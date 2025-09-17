@@ -17,7 +17,7 @@ const io = new Server(server, {
 });
 
 // Single data file at project root /data/users.json
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = path.join(process.cwd(), "src", "data");
 const DATA_FILE = path.join(DATA_DIR, "users.json");
 const ensureDataFile = () => {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);

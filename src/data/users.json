@@ -5,7 +5,9 @@
       "username": "aa",
       "email": "aa@gmail.com",
       "password": "1q2w3e4r",
-      "friends": [],
+      "friends": [
+        "1758102707786"
+      ],
       "requests": []
     },
     {
@@ -13,9 +15,43 @@
       "username": "bb",
       "email": "bb@gmail.com",
       "password": "1q2w3e4r",
+      "friends": [
+        "1758102627903"
+      ],
+      "requests": []
+    },
+    {
+      "id": "1758119467004",
+      "username": "ee",
+      "email": "ee@gmail.com",
+      "password": "1q2w3e4r",
       "friends": [],
       "requests": []
     }
   ],
-  "messages": {}
+  "messages": {
+    "1758102627903-1758102707786": [
+      {
+        "id": "1758122761483_v2h5z6k",
+        "senderId": "1758102707786",
+        "receiverId": "1758102627903",
+        "text": "hi",
+        "timestamp": "2025-09-17T15:26:01.483Z"
+      },
+      {
+        "id": "1758122766514_7eaqryh",
+        "senderId": "1758102707786",
+        "receiverId": "1758102627903",
+        "text": "i am aa",
+        "timestamp": "2025-09-17T15:26:06.514Z"
+      },
+      {
+        "id": "1758122776852_49blphh",
+        "senderId": "1758102707786",
+        "receiverId": "1758102627903",
+        "text": "sorry, i am bb",
+        "timestamp": "2025-09-17T15:26:16.852Z"
+      }
+    ]
+  }
 }

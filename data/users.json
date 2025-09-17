@@ -20,6 +20,22 @@
         "1758100470941"
       ],
       "requests": []
+    },
+    {
+      "id": "1758117492994",
+      "username": "cc",
+      "email": "cc@gmail.com",
+      "password": "1q2w3e4r",
+      "friends": [],
+      "requests": []
+    },
+    {
+      "id": "1758118875406",
+      "username": "dd",
+      "email": "dd@gmail.com",
+      "password": "1q2w3e4r",
+      "friends": [],
+      "requests": []
     }
   ],
   "messages": {
