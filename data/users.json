@@ -1,0 +1,115 @@
+{
+  "users": [
+    {
+      "id": "1758100470941",
+      "username": "jhdjs",
+      "email": "aa@gmail.com",
+      "password": "1q2w3e4r",
+      "friends": [
+        "1758103260530"
+      ],
+      "requests": []
+    },
+    {
+      "id": "1758103260530",
+      "username": "Anurag kumar",
+      "email": "anurag.5152.kumar@gmail.com",
+      "password": "1q2w3e4r",
+      "friends": [
+        "1758103260530",
+        "1758100470941"
+      ],
+      "requests": []
+    }
+  ],
+  "messages": {
+    "1758103260530-1758103260530": [
+      {
+        "id": "1758103334379_7jr6mu8",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "hi",
+        "timestamp": "2025-09-17T10:02:14.379Z"
+      },
+      {
+        "id": "1758103341238_37h5utg",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "what's up",
+        "timestamp": "2025-09-17T10:02:21.238Z"
+      },
+      {
+        "id": "1758103350754_mr03g85",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "fine",
+        "timestamp": "2025-09-17T10:02:30.754Z"
+      },
+      {
+        "id": "1758103359341_32ge7t4",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "wbu",
+        "timestamp": "2025-09-17T10:02:39.341Z"
+      },
+      {
+        "id": "1758103368465_tyykc7f",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "nothing",
+        "timestamp": "2025-09-17T10:02:48.465Z"
+      },
+      {
+        "id": "1758103372803_1uizemq",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "so what now",
+        "timestamp": "2025-09-17T10:02:52.803Z"
+      },
+      {
+        "id": "1758103522537_z0h5zku",
+        "senderId": "1758103260530",
+        "receiverId": "1758103260530",
+        "text": "what idk",
+        "timestamp": "2025-09-17T10:05:22.537Z"
+      }
+    ],
+    "1758100470941-1758103260530": [
+      {
+        "id": "1758103470826_5f5zj4r",
+        "senderId": "1758100470941",
+        "receiverId": "1758103260530",
+        "text": "hey",
+        "timestamp": "2025-09-17T10:04:30.826Z"
+      },
+      {
+        "id": "1758103479087_b52oa9n",
+        "senderId": "1758100470941",
+        "receiverId": "1758103260530",
+        "text": "how r u doing",
+        "timestamp": "2025-09-17T10:04:39.087Z"
+      },
+      {
+        "id": "1758103517940_8xmro3m",
+        "senderId": "1758103260530",
+        "receiverId": "1758100470941",
+        "text": "idk",
+        "timestamp": "2025-09-17T10:05:17.940Z"
+      },
+      {
+        "id": "1758103533822_ewce7ug",
+        "senderId": "1758103260530",
+        "receiverId": "1758100470941",
+        "text": "just donl",
+        "timestamp": "2025-09-17T10:05:33.822Z"
+      },
+      {
+        "id": "1758103566629_bsth3vx",
+        "senderId": "1758103260530",
+        "receiverId": "1758100470941",
+        "text": "hi",
+        "timestamp": "2025-09-17T10:06:06.629Z"
+      }
+    ]
+  }
+}

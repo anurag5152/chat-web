@@ -47,22 +47,22 @@ const signupUser = (req, res) => {
 };
 
 // -------------------- Login --------------------
-const loginUser = (req, res) => {
-  const { email, password } = req.body;
+// const loginUser = (req, res) => {
+//   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ message: "All fields are required" });
-  }
+//   if (!email || !password) {
+//     return res.status(400).json({ message: "All fields are required" });
+//   }
 
-  const users = readUsers();
+//   const users = readUsers();
 
-  const user = users.find((u) => u.email === email && u.password === password);
+//   const user = users.find((u) => u.email === email && u.password === password);
 
-  if (!user) {
-    return res.status(400).json({ message: "Invalid email or password" });
-  }
+//   if (!user) {
+//     return res.status(400).json({ message: "Invalid email or password" });
+//   }
 
-  res.status(200).json({ message: "Login successful", user });
-};
+//   res.status(200).json({ message: "Login successful", user });
+// };
 
 module.exports = { signupUser, loginUser };

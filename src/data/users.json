@@ -1,14 +1,21 @@
-[
-  {
-    "id": 1757661759383,
-    "username": "Anurag kumar",
-    "email": "anurag.5152.kumar@gmail.com",
-    "password": "1q2w3e4r"
-  },
-  {
-    "id": 1757662714714,
-    "username": "anurag",
-    "email": "anurag.7172.kumar@gmail.com",
-    "password": "1q2w3e4r"
-  }
-]
+{
+  "users": [
+    {
+      "id": "1758102627903",
+      "username": "aa",
+      "email": "aa@gmail.com",
+      "password": "1q2w3e4r",
+      "friends": [],
+      "requests": []
+    },
+    {
+      "id": "1758102707786",
+      "username": "bb",
+      "email": "bb@gmail.com",
+      "password": "1q2w3e4r",
+      "friends": [],
+      "requests": []
+    }
+  ],
+  "messages": {}
+}
