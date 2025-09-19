@@ -13,7 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 const io = new Server(server, {
-  cors: { origin: "http://localhost:3000", methods: ["GET", "POST"] },
+  cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
 // Single data file at project root /data/users.json
@@ -256,6 +256,7 @@ io.on("connection", (socket) => {
       writeData(data);
 
       // deliver to receiver room
+       
       io.to(receiverId).emit("receiveMessage", msg);
 
       // deliver to sender's other sockets (exclude the sending socket)
@@ -276,6 +277,11 @@ app.post("/api/debug/reset", (req, res) => {
   return res.json({ message: "reset ok" });
 });
 
+app.use(express.static(path.join(__dirname, "build")));
+
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "build", "index.html"));
+});
 // start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
