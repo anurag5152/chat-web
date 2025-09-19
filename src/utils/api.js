@@ -60,6 +60,15 @@ export const acceptFriendRequest = async (userId, friendId) => {
   return handleRes(res);
 };
 
+export const rejectFriendRequest = async (userId, friendId) => {
+  const res = await fetch(`${API_URL}/friends/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, friendId }),
+  });
+  return handleRes(res);
+};
+
 export const getFriends = async (userId) => {
   const res = await fetch(`${API_URL}/friends/${userId}`);
   return handleRes(res);

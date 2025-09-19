@@ -9,7 +9,6 @@ const path = require("path");
 const app = express();
 const server = http.createServer(app);
 
-// CORS: adjust origin if you deploy to a specific domain
 app.use(cors());
 app.use(express.json());
 
@@ -17,7 +16,6 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// Data file in src/data/users.json
 const DATA_DIR = path.join(process.cwd(), "src", "data");
 const DATA_FILE = path.join(DATA_DIR, "users.json");
 
@@ -32,15 +30,13 @@ ensureDataFile();
 function readData() {
   ensureDataFile();
   try {
-    const raw = fs.readFileSync(DATA_FILE, "utf-8");
-    return JSON.parse(raw);
+    return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
   } catch (e) {
     console.error("readData error:", e);
     return { users: [], messages: {} };
   }
 }
 
-// Simple atomic write
 function writeData(data) {
   try {
     const tmp = DATA_FILE + ".tmp";
@@ -68,7 +64,7 @@ app.post("/api/auth/signup", (req, res) => {
       id: Date.now().toString(),
       username,
       email: nemail,
-      password, // NOTE: store plaintext only for demo/dev. Hash in prod.
+      password,
       friends: [],
       requests: [],
     };
@@ -144,6 +140,7 @@ app.post("/api/friends/request", (req, res) => {
       toUser.requests.push(String(fromId));
       writeData(data);
 
+      // notify recipient in realtime
       io.to(String(toId)).emit("friendRequest", {
         fromId: String(fromId),
         fromUser: { id: fromUser.id, username: fromUser.username, email: fromUser.email },
@@ -189,6 +186,33 @@ app.post("/api/friends/accept", (req, res) => {
     return res.json({ message: "Friend request accepted" });
   } catch (err) {
     console.error("accept error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// NEW: Reject friend request (remove request, notify sender)
+app.post("/api/friends/reject", (req, res) => {
+  try {
+    const { userId, friendId } = req.body;
+    if (!userId || !friendId) return res.status(400).json({ message: "userId and friendId required" });
+
+    const data = readData();
+    const user = data.users.find((u) => u.id === String(userId));
+    const friend = data.users.find((u) => u.id === String(friendId));
+    if (!user || !friend) return res.status(404).json({ message: "User not found" });
+
+    user.requests = (user.requests || []).filter((id) => id !== String(friendId));
+    writeData(data);
+
+    // notify sender that request was rejected (optional)
+    io.to(String(friendId)).emit("requestRejected", {
+      toId: String(userId),
+      toUser: { id: user.id, username: user.username, email: user.email },
+    });
+
+    return res.json({ message: "Friend request rejected" });
+  } catch (err) {
+    console.error("reject error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 });
@@ -245,7 +269,6 @@ app.get("/api/chat/:userId/:friendId", (req, res) => {
 
 // ---------- SOCKET.IO ----------
 io.on("connection", (socket) => {
-  // join room by user id when client emits join
   socket.on("join", (userId) => {
     if (!userId) return;
     socket.join(String(userId));
@@ -276,10 +299,6 @@ io.on("connection", (socket) => {
       console.error("socket sendMessage error:", err);
     }
   });
-
-  socket.on("disconnect", () => {
-    // optional: handle disconnect
-  });
 });
 
 // ---------- DEBUG ----------
@@ -292,7 +311,7 @@ app.post("/api/debug/reset", (req, res) => {
   return res.json({ message: "reset ok" });
 });
 
-// Serve static build (if you build frontend to "build" folder)
+// Serve frontend build if exists
 app.use(express.static(path.join(__dirname, "build")));
 app.use((req, res, next) => {
   res.sendFile(path.join(__dirname, "build", "index.html"));

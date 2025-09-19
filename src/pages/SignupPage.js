@@ -23,53 +23,52 @@ export default function SignupPage() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-100">
-      <div className="w-1/2 flex flex-col justify-center items-center bg-blue-600 text-white p-10">
-        <h1 className="text-5xl font-bold mb-6">ChatConnect</h1>
-        <p className="text-lg text-center">Create your account and start chatting instantly.</p>
+    <div className="min-h-screen flex flex-col md:flex-row">
+      <div className="md:w-1/2 w-full flex flex-col justify-center items-center bg-blue-600 text-white p-8">
+        <h1 className="text-4xl md:text-5xl font-bold mb-4">ChatConnect</h1>
+        <p className="text-center max-w-md">Create your account and start chatting instantly.</p>
       </div>
 
-      <div className="w-1/2 flex flex-col justify-center items-center bg-white shadow-lg">
-        <h2 className="text-3xl font-bold mb-6">Sign Up</h2>
-        <form className="w-2/3" onSubmit={handleSubmit}>
-          <input
-            name="username"
-            type="text"
-            placeholder="Username"
-            value={formData.username}
-            onChange={handleChange}
-            className="w-full mb-4 p-3 border rounded-lg"
-            required
-          />
-          <input
-            name="email"
-            type="email"
-            placeholder="Email"
-            value={formData.email}
-            onChange={handleChange}
-            className="w-full mb-4 p-3 border rounded-lg"
-            required
-          />
-          <input
-            name="password"
-            type="password"
-            placeholder="Password"
-            value={formData.password}
-            onChange={handleChange}
-            className="w-full mb-6 p-3 border rounded-lg"
-            required
-          />
-          <button type="submit" className="w-full bg-blue-600 text-white p-3 rounded-lg">
-            Sign Up
-          </button>
-        </form>
-        {error && <p className="text-red-600 mt-2">{error}</p>}
-        <p className="mt-4 text-gray-600">
-          Already have an account?{" "}
-          <span onClick={() => navigate("/")} className="text-blue-600 cursor-pointer">
-            Login
-          </span>
-        </p>
+      <div className="md:w-1/2 w-full flex items-center justify-center p-6 bg-gray-50">
+        <div className="w-full max-w-md bg-white rounded-lg shadow-md p-6">
+          <h2 className="text-2xl font-bold mb-4">Sign Up</h2>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <input
+              name="username"
+              type="text"
+              placeholder="Username"
+              value={formData.username}
+              onChange={handleChange}
+              className="w-full p-3 border rounded-lg"
+              required
+            />
+            <input
+              name="email"
+              type="email"
+              placeholder="Email"
+              value={formData.email}
+              onChange={handleChange}
+              className="w-full p-3 border rounded-lg"
+              required
+            />
+            <input
+              name="password"
+              type="password"
+              placeholder="Password"
+              value={formData.password}
+              onChange={handleChange}
+              className="w-full p-3 border rounded-lg"
+              required
+            />
+            <button type="submit" className="w-full bg-blue-600 text-white p-3 rounded-lg">Sign Up</button>
+          </form>
+
+          {error && <p className="text-red-600 mt-3">{error}</p>}
+
+          <div className="mt-4 text-sm">
+            Already have an account? <button onClick={() => navigate("/")} className="text-blue-600 font-medium">Login</button>
+          </div>
+        </div>
       </div>
     </div>
   );
