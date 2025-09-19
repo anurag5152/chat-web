@@ -1,5 +1,10 @@
 // src/utils/api.js
-const API_URL = "http://localhost:5000/api";
+
+// Dynamically set API URL based on environment
+const API_URL =
+  process.env.NODE_ENV === "production"
+    ? "/api" // in Render (served by the same Express server)
+    : "http://localhost:5000/api"; // in local dev
 
 async function handleRes(res) {
   const json = await res.json().catch(() => ({}));
