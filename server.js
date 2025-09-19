@@ -279,9 +279,11 @@ app.post("/api/debug/reset", (req, res) => {
 
 app.use(express.static(path.join(__dirname, "build")));
 
-app.get("/*", (req, res) => {
+// must come *after* API routes
+app.use((req, res, next) => {
   res.sendFile(path.join(__dirname, "build", "index.html"));
 });
+
 
 // start server
 const PORT = process.env.PORT || 5000;
