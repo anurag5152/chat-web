@@ -15,6 +15,7 @@ export default function LoginPage() {
     setError("");
     try {
       const res = await login(formData);
+      // server returns safe user object (no password)
       localStorage.setItem("user", JSON.stringify(res));
       navigate("/chat");
     } catch (err) {

@@ -1,4 +1,4 @@
-// server.js (root)
+// server.js
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
@@ -9,6 +9,7 @@ const path = require("path");
 const app = express();
 const server = http.createServer(app);
 
+// CORS: adjust origin if you deploy to a specific domain
 app.use(cors());
 app.use(express.json());
 
@@ -16,30 +17,43 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
-// Single data file at project root /data/users.json
+// Data file in src/data/users.json
 const DATA_DIR = path.join(process.cwd(), "src", "data");
 const DATA_FILE = path.join(DATA_DIR, "users.json");
-const ensureDataFile = () => {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+
+function ensureDataFile() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(DATA_FILE)) {
     fs.writeFileSync(DATA_FILE, JSON.stringify({ users: [], messages: {} }, null, 2));
   }
-};
+}
 ensureDataFile();
 
-const readData = () => {
+function readData() {
   ensureDataFile();
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE));
+    const raw = fs.readFileSync(DATA_FILE, "utf-8");
+    return JSON.parse(raw);
   } catch (e) {
+    console.error("readData error:", e);
     return { users: [], messages: {} };
   }
-};
-const writeData = (d) => fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2));
+}
+
+// Simple atomic write
+function writeData(data) {
+  try {
+    const tmp = DATA_FILE + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, DATA_FILE);
+  } catch (e) {
+    console.error("writeData error:", e);
+  }
+}
 
 const normEmail = (email) => (typeof email === "string" ? email.trim().toLowerCase() : email);
 
-// ---------------- AUTH ----------------
+// ---------- AUTH ----------
 app.post("/api/auth/signup", (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -54,7 +68,7 @@ app.post("/api/auth/signup", (req, res) => {
       id: Date.now().toString(),
       username,
       email: nemail,
-      password,
+      password, // NOTE: store plaintext only for demo/dev. Hash in prod.
       friends: [],
       requests: [],
     };
@@ -99,7 +113,7 @@ app.get("/api/users/:userId", (req, res) => {
   res.json(safe);
 });
 
-// ---------------- FRIENDS ----------------
+// ---------- FRIENDS ----------
 app.post("/api/friends/search", (req, res) => {
   try {
     const { email } = req.body;
@@ -130,7 +144,6 @@ app.post("/api/friends/request", (req, res) => {
       toUser.requests.push(String(fromId));
       writeData(data);
 
-      // real-time notify recipient (room = toId)
       io.to(String(toId)).emit("friendRequest", {
         fromId: String(fromId),
         fromUser: { id: fromUser.id, username: fromUser.username, email: fromUser.email },
@@ -164,7 +177,6 @@ app.post("/api/friends/accept", (req, res) => {
 
     writeData(data);
 
-    // notify both
     io.to(String(userId)).emit("friendAccepted", {
       userId: String(userId),
       friend: { id: friend.id, username: friend.username, email: friend.email },
@@ -217,7 +229,7 @@ app.get("/api/requests/:userId", (req, res) => {
   }
 });
 
-// ---------------- CHAT ----------------
+// ---------- CHAT ----------
 app.get("/api/chat/:userId/:friendId", (req, res) => {
   try {
     const { userId, friendId } = req.params;
@@ -231,7 +243,7 @@ app.get("/api/chat/:userId/:friendId", (req, res) => {
   }
 });
 
-// ---------------- SOCKET.IO ----------------
+// ---------- SOCKET.IO ----------
 io.on("connection", (socket) => {
   // join room by user id when client emits join
   socket.on("join", (userId) => {
@@ -256,7 +268,6 @@ io.on("connection", (socket) => {
       writeData(data);
 
       // deliver to receiver room
-       
       io.to(receiverId).emit("receiveMessage", msg);
 
       // deliver to sender's other sockets (exclude the sending socket)
@@ -265,9 +276,13 @@ io.on("connection", (socket) => {
       console.error("socket sendMessage error:", err);
     }
   });
+
+  socket.on("disconnect", () => {
+    // optional: handle disconnect
+  });
 });
 
-// ---------- DEBUG helpers (dev only) ----------
+// ---------- DEBUG ----------
 app.get("/api/debug/users", (req, res) => {
   const data = readData();
   return res.json(data.users);
@@ -277,14 +292,11 @@ app.post("/api/debug/reset", (req, res) => {
   return res.json({ message: "reset ok" });
 });
 
+// Serve static build (if you build frontend to "build" folder)
 app.use(express.static(path.join(__dirname, "build")));
-
-// must come *after* API routes
 app.use((req, res, next) => {
   res.sendFile(path.join(__dirname, "build", "index.html"));
 });
 
-
-// start server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
