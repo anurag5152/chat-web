@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 
-
 // Initialize socket outside of the component to prevent re-creation on re-renders.
 const socket = io('http://localhost:5000', { withCredentials: true, autoConnect: false });
 
@@ -251,56 +250,69 @@ const Chatpage = () => {
   }
 
   return (
-    <div className="flex h-screen bg-gray-100">
+    <div className="flex h-screen bg-[#0D1117] text-[#E6EDF3] font-mono">
       {/* Sidebar */}
-      <div className="w-1/4 bg-white border-r border-gray-200 flex flex-col">
-        <div className="p-4 border-b border-gray-200">
+      <div className="w-full md:w-1/4 bg-[#0D1117] border-r border-gray-800 flex flex-col shadow-inner">
+        <div className="p-4 border-b border-gray-800">
           <input
             type="text"
             placeholder="Search by email"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full p-2 border border-gray-300 rounded-lg"
+            className="w-full p-2 bg-[#161B22] border border-[#00FF99] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#00FF99] text-[#E6EDF3]"
           />
         </div>
         <div className="flex-1 overflow-y-auto">
           {searchResults.length > 0 && (
             <div>
-              <h2 className="p-4 text-lg font-semibold">Search Results</h2>
+              <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Search Results</h2>
               <ul>
                 {searchResults.map(user => (
-                  <li key={user.id} className="flex items-center justify-between p-4 hover:bg-gray-50">
-                    <span>{user.name} ({user.email})</span>
-                    <button onClick={() => handleSendFriendRequest(user.email)} className="p-2 text-blue-500">Add</button>
+                  <li key={user.id} className="flex items-center justify-between p-4 hover:bg-[#161B22] cursor-pointer">
+                    <div className="flex items-center">
+                      <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                      <div>
+                        <span className="font-bold">{user.name}</span>
+                        <span className="text-xs text-gray-400 block">{user.email}</span>
+                      </div>
+                    </div>
+                    <button onClick={() => handleSendFriendRequest(user.email)} className="p-2 text-[#00FF99] hover:bg-[#00FF99] hover:text-black rounded">Add</button>
                   </li>
                 ))}
               </ul>
             </div>
           )}
-          <h2 className="p-4 text-lg font-semibold">Friend Requests</h2>
+          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friend Requests</h2>
           {friendRequests.length > 0 ? (
             <ul>
               {friendRequests.map(req => (
-                <li key={req.id} className="flex items-center justify-between p-4 hover:bg-gray-50">
-                  <span>{req.name} ({req.email})</span>
+                <li key={req.id} className="flex items-center justify-between p-4 hover:bg-[#161B22]">
+                   <div className="flex items-center">
+                      <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                      <div>
+                        <span className="font-bold">{req.name}</span>
+                        <span className="text-xs text-gray-400 block">{req.email}</span>
+                      </div>
+                    </div>
                   <div className="flex space-x-2">
-                    <button onClick={() => handleAcceptFriendRequest(req.id)} className="p-2 text-green-500">Accept</button>
-                    <button onClick={() => handleRejectFriendRequest(req.id)} className="p-2 text-red-500">Reject</button>
+                    <button onClick={() => handleAcceptFriendRequest(req.id)} className="p-2 text-green-500 hover:bg-green-500 hover:text-black rounded">Accept</button>
+                    <button onClick={() => handleRejectFriendRequest(req.id)} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Reject</button>
                   </div>
                 </li>
               ))}
             </ul>
           ) : <p className="px-4 text-gray-500">No new requests.</p>}
 
-          <h2 className="p-4 text-lg font-semibold">Friends</h2>
+          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friends</h2>
           {friends.length > 0 ? (
             <ul>
               {friends.map(friend => (
                 <li
                   key={friend.id}
                   onClick={() => selectFriend(friend)}
-                  className={`p-4 hover:bg-gray-100 cursor-pointer ${activeChat?.id === friend.id ? 'bg-blue-100' : ''}`}
+                  className={`p-4 flex items-center hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
                 >
+                  <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
                   {friend.name}
                 </li>
               ))}
@@ -310,12 +322,19 @@ const Chatpage = () => {
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col bg-[#0D1117]">
         {activeChat ? (
           <>
             {/* Chat Header */}
-            <div className="p-4 bg-white border-b border-gray-200">
-              <h2 className="text-xl font-semibold">Chat with {activeChat.name}</h2>
+            <div className="p-4 bg-[#0D1117]/50 border-b border-gray-800 flex items-center shadow-lg">
+              <div className="relative">
+                <div className="w-10 h-10 rounded-full bg-teal-500/50 mr-4"></div>
+                {/* <div className="absolute bottom-0 right-4 w-3 h-3 bg-green-500 rounded-full border-2 border-[#0D1117] animate-pulse"></div> */}
+              </div>
+              <div>
+                <h2 className="text-xl font-semibold text-white">{activeChat.name}</h2>
+                <p className="text-sm text-[#8B949E]">{activeChat.email}</p>
+              </div>
             </div>
 
             {/* Messages */}
@@ -326,10 +345,10 @@ const Chatpage = () => {
                   className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
                 >
                   <div
-                    className={`p-3 rounded-lg max-w-xs ${
+                    className={`p-3 rounded-xl max-w-md shadow-lg ${
                       message.sender_id === currentUser.id
-                        ? 'bg-blue-500 text-white'
-                        : 'bg-gray-300 text-black'
+                        ? 'bg-[#238636] text-white border border-[#00FF99]/50'
+                        : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'
                     }`}
                   >
                     {message.content}
@@ -340,27 +359,29 @@ const Chatpage = () => {
             </div>
 
             {/* Message Input */}
-            <div className="p-4 bg-white border-t border-gray-200">
-              <div className="flex">
+            <div className="p-4 bg-[#0D1117]/50 border-t border-gray-800">
+              <div className="flex items-center bg-[#161B22] rounded-lg border border-transparent focus-within:border-[#00FF99]">
                 <input
                   type="text"
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
                   placeholder="Type a message..."
-                  className="flex-1 p-2 border border-gray-300 rounded-l-lg"
+                  className="flex-1 p-3 bg-transparent rounded-l-lg focus:outline-none text-[#E6EDF3]"
                 />
                 <button
                   onClick={handleSendMessage}
-                  className="p-2 bg-blue-500 text-white rounded-r-lg"
+                  className="p-3 bg-gradient-to-r from-teal-500 to-green-500 text-white rounded-r-lg hover:from-teal-600 hover:to-green-600"
                 >
-                  Send
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
+                  </svg>
                 </button>
               </div>
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-gray-500">
+          <div className="flex-1 flex items-center justify-center text-[#8B949E] text-xl">
             <p>Select a friend to start chatting.</p>
           </div>
         )}
