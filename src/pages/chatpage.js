@@ -2,16 +2,20 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 
-// Initialize socket outside of the component to prevent re-creation on re-renders.
-const socket = io('http://localhost:5000', { withCredentials: true, autoConnect: false });
+// NOTE: make sure this matches your server location
+const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
+
+// Initialize socket outside component so it persists across re-renders
+const socket = io(SOCKET_URL, { withCredentials: true, autoConnect: false });
 
 const Chatpage = () => {
-  // State for managing component data
+  // State
   const [currentUser, setCurrentUser] = useState(null);
   const [friends, setFriends] = useState([]);
   const [friendRequests, setFriendRequests] = useState([]);
   const [activeChat, setActiveChat] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [loadingMessages, setLoadingMessages] = useState(false);
   const [newMessage, setNewMessage] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -20,9 +24,7 @@ const Chatpage = () => {
   const groupMessagesByDate = (messages) => {
     return messages.reduce((acc, message) => {
       const date = new Date(message.timestamp).toLocaleDateString();
-      if (!acc[date]) {
-        acc[date] = [];
-      }
+      if (!acc[date]) acc[date] = [];
       acc[date].push(message);
       return acc;
     }, {});
@@ -32,23 +34,22 @@ const Chatpage = () => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
-  // Helper to create authenticated fetch requests
+  // authenticated fetch helper
   const authFetch = (url, options = {}) => {
     return fetch(url, {
       ...options,
-      credentials: 'include', // This is crucial for sending session cookies
+      credentials: 'include',
     });
   };
 
-  // Effect for initial data loading and socket connection
+  // initial data load
   useEffect(() => {
-    // 1. Fetch initial data (user, friends, requests)
     const fetchData = async () => {
       try {
         const userRes = await authFetch('/api/session');
         const userData = await userRes.json();
         if (!userData.loggedIn) {
-          window.location.href = '/login'; // Redirect if not logged in
+          window.location.href = '/login';
           return;
         }
         setCurrentUser(userData.user);
@@ -66,56 +67,93 @@ const Chatpage = () => {
     };
 
     fetchData();
+  }, []);
 
-    // 2. Connect the socket if it's not already connected
+  // socket connect + core listeners (only when currentUser becomes available)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // attach userId in auth for eventual debugging/identify if needed
+    socket.auth = { userId: currentUser.id };
+
     if (!socket.connected) {
       socket.connect();
     }
 
-    socket.on('connect', () => {
-      console.log('Socket connected:', socket.id);
-    });
+    const onConnect = () => console.log('Socket connected:', socket.id);
+    const onConnectError = (err) => console.error('Socket connection error:', err);
 
-    // 3. Listen for incoming private messages
-    const handlePrivateMessage = (message) => {
-      console.log('Received private message:', message);
-      // If the incoming message is for the currently active chat, update the messages state
+    socket.on('connect', onConnect);
+    socket.on('connect_error', onConnectError);
+
+    // New incoming friend request
+    const handleNewFriendRequest = (request) => {
+      // avoid duplicates
+      setFriendRequests(prev => {
+        if (prev.find(r => r.id === request.id)) return prev;
+        return [request, ...prev];
+      });
+    };
+    socket.on('new_friend_request', handleNewFriendRequest);
+
+    // When someone accepts your friend request
+    const handleFriendRequestAccepted = (newFriend) => {
+      setFriends(prev => {
+        if (prev.find(f => f.id === newFriend.id)) return prev;
+        return [newFriend, ...prev];
+      });
+    };
+    socket.on('friend_request_accepted', handleFriendRequestAccepted);
+
+    // When someone removes you as a friend
+    const handleFriendRemoved = ({ friendId }) => {
+      setFriends(prev => prev.filter(friend => friend.id !== friendId));
       setActiveChat(currentActiveChat => {
-        if (currentActiveChat && (message.sender_id === currentActiveChat.id || message.receiver_id === currentActiveChat.id)) {
-          setMessages(prevMessages => {
-            if (prevMessages.find(m => m.id === message.id)) {
-              return prevMessages;
-            }
-            return [...(Array.isArray(prevMessages) ? prevMessages : []), message];
-          });
+        if (currentActiveChat && currentActiveChat.id === friendId) {
+          setMessages([]);
+          return null;
         }
         return currentActiveChat;
       });
     };
-    socket.on('private_message', handlePrivateMessage);
+    socket.on('friend_removed', handleFriendRemoved);
 
-    // Listen for new friend requests
-    const handleNewFriendRequest = (request) => setFriendRequests(prev => [request, ...(Array.isArray(prev) ? prev : [])]);
-    socket.on('new_friend_request', handleNewFriendRequest);
-
-    // Listen for when another user accepts your friend request
-    const handleFriendRequestAccepted = (newFriend) => setFriends(prev => [newFriend, ...(Array.isArray(prev) ? prev : [])]);
-    socket.on('friend_request_accepted', handleFriendRequestAccepted);
-
-    // 4. Cleanup on component unmount
+    // cleanup
     return () => {
-      console.log('Cleaning up socket listeners...');
-      socket.off('private_message', handlePrivateMessage);
+      socket.off('connect', onConnect);
+      socket.off('connect_error', onConnectError);
       socket.off('new_friend_request', handleNewFriendRequest);
       socket.off('friend_request_accepted', handleFriendRequestAccepted);
+      socket.off('friend_removed', handleFriendRemoved);
     };
-  }, []);
+  }, [currentUser]);
 
-  // Effect to scroll to the bottom of the message list when new messages arrive
+  // incoming private messages handler
+  useEffect(() => {
+    const handlePrivateMessage = (message) => {
+      // If the message belongs to the currently active chat, append it
+      if (activeChat && (message.sender_id === activeChat.id || message.receiver_id === activeChat.id)) {
+        setMessages(prevMessages => {
+          // avoid duplicates by id
+          if (prevMessages.find(m => m.id === message.id)) return prevMessages;
+          return [...prevMessages, message];
+        });
+      } else {
+        // If not active chat, you could show unread counts here; for now we just log
+        console.log('Private message received for other chat', message);
+      }
+    };
+
+    socket.on('private_message', handlePrivateMessage);
+    return () => socket.off('private_message', handlePrivateMessage);
+  }, [activeChat]);
+
+  // auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // user search debounce
   useEffect(() => {
     const searchUsers = async () => {
       if (searchQuery.trim() === '') {
@@ -123,7 +161,7 @@ const Chatpage = () => {
         return;
       }
       try {
-        const res = await authFetch(`/api/users/search?email=${searchQuery}`);
+        const res = await authFetch(`/api/users/search?email=${encodeURIComponent(searchQuery)}`);
         const data = await res.json();
         if (res.ok) {
           setSearchResults(data);
@@ -135,74 +173,91 @@ const Chatpage = () => {
       }
     };
 
-    const debounceTimeout = setTimeout(() => {
-      searchUsers();
-    }, 300);
-
+    const debounceTimeout = setTimeout(searchUsers, 300);
     return () => clearTimeout(debounceTimeout);
   }, [searchQuery]);
 
-
-  // Function to handle selecting a friend to chat with
+  // select friend & load messages
   const selectFriend = async (friend) => {
     setActiveChat(friend);
-    setMessages([]); // Clear previous messages
+    setMessages([]); // Clear previous messages while loading
+    setLoadingMessages(true);
     try {
       const res = await authFetch(`/api/messages/${friend.id}`);
       const data = await res.json();
       if (res.ok) {
-        setMessages(data);
+        setMessages(Array.isArray(data) ? data : []);
       } else {
         console.error("Failed to fetch messages:", data.error);
       }
     } catch (error) {
       console.error("Error fetching messages:", error);
+    } finally {
+      setLoadingMessages(false);
     }
   };
 
+  // Robust send: optimistic UI + server replace (dedupe)
   const handleSendMessage = () => {
-    if (newMessage.trim() && activeChat && socket) {
-      const messageData = {
-        id: uuidv4(),
-        content: newMessage,
-        to: activeChat.id,
-      };
-      console.log('Sending private message:', messageData);
+    if (!newMessage.trim() || !activeChat || !currentUser) return;
 
-      // Emit the message to the server
-      socket.emit('private_message', messageData, (response) => {
-        if (response.error) {
-          console.error('Message failed to send:', response.error);
-        } else {
-          console.log('Message sent successfully, response:', response);
-          // Optimistically update the UI with the message sent back from the server
-          setMessages(prevMessages => [...(Array.isArray(prevMessages) ? prevMessages : []), response.message]);
-        }
-      });
+    // client temporary message id
+    const tempId = uuidv4();
+    const optimisticMessage = {
+      id: tempId,
+      sender_id: currentUser.id,
+      receiver_id: activeChat.id,
+      content: newMessage,
+      timestamp: new Date().toISOString(),
+    };
 
-      setNewMessage('');
-    }
+    // Append immediately (optimistic)
+    setMessages(prev => [...prev, optimisticMessage]);
+
+    const messageData = {
+      id: tempId, // provide temp id so we can replace it after server ack
+      content: newMessage,
+      to: activeChat.id,
+    };
+
+    // send to server with callback
+    socket.emit('private_message', messageData, (response) => {
+      if (response && response.error) {
+        console.error('Message failed to send:', response.error);
+        // Optionally mark the message as failed (not implemented visually here)
+        return;
+      }
+      if (response && response.message) {
+        const serverMsg = response.message;
+        // replace optimistic temp message with server message (by tempId)
+        setMessages(prev => {
+          // if server already in list by id, ignore
+          if (prev.find(m => m.id === serverMsg.id)) return prev;
+          // replace the temp message with server message
+          return prev.map(m => (m.id === tempId ? serverMsg : m));
+        });
+      }
+    });
+
+    setNewMessage('');
   };
 
   const handleSendFriendRequest = async (email) => {
     try {
       const res = await authFetch('/api/friend-request', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
       });
       const data = await res.json();
       if (res.ok) {
-        alert('Friend request sent!');
+        console.log('Friend request sent!');
         setSearchResults(prev => prev.filter(user => user.email !== email));
       } else {
-        alert(`Failed to send friend request: ${data.error}`);
+        console.error(`Failed to send friend request: ${data.error}`);
       }
     } catch (error) {
       console.error("Error sending friend request:", error);
-      alert('Error sending friend request.');
     }
   };
 
@@ -210,26 +265,53 @@ const Chatpage = () => {
     try {
       const res = await authFetch('/api/friend-request/accept', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requestId }),
       });
       const data = await res.json();
       if (res.ok) {
-        alert('Friend request accepted!');
-        setFriendRequests(prev => prev.filter(req => req.id !== requestId));
-        // Add the new friend to the friends list
-        const newFriend = friendRequests.find(req => req.id === requestId);
-        if(newFriend) {
-            setFriends(prev => [...(Array.isArray(prev) ? prev : []), {id: newFriend.sender_id, name: newFriend.name, email: newFriend.email}]);
+        console.log('Friend request accepted!');
+        const acceptedRequest = friendRequests.find(req => req.id === requestId);
+        if (acceptedRequest) {
+          const newFriend = {
+            id: acceptedRequest.sender_id,
+            name: acceptedRequest.name,
+            email: acceptedRequest.email,
+          };
+          setFriends(prev => {
+            if (prev.find(f => f.id === newFriend.id)) return prev;
+            return [newFriend, ...prev];
+          });
         }
+        setFriendRequests(prev => prev.filter(req => req.id !== requestId));
       } else {
-        alert(`Failed to accept friend request: ${data.error}`);
+        console.error(`Failed to accept friend request: ${data.error}`);
       }
     } catch (error) {
       console.error("Error accepting friend request:", error);
-      alert('Error accepting friend request.');
+    }
+  };
+
+  const handleRemoveFriend = async (friendId) => {
+    try {
+      const res = await authFetch('/api/friends/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ friendId }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        console.log('Friend removed!');
+        setFriends(prev => prev.filter(friend => friend.id !== friendId));
+        if (activeChat?.id === friendId) {
+          setActiveChat(null);
+          setMessages([]);
+        }
+      } else {
+        console.error(`Failed to remove friend: ${data.error}`);
+      }
+    } catch (error) {
+      console.error("Error removing friend:", error);
     }
   };
 
@@ -237,24 +319,20 @@ const Chatpage = () => {
     try {
       const res = await authFetch('/api/friend-request/reject', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requestId }),
       });
       const data = await res.json();
       if (res.ok) {
-        alert('Friend request rejected!');
+        console.log('Friend request rejected!');
         setFriendRequests(prev => prev.filter(req => req.id !== requestId));
       } else {
-        alert(`Failed to reject friend request: ${data.error}`);
+        console.error(`Failed to reject friend request: ${data.error}`);
       }
     } catch (error) {
       console.error("Error rejecting friend request:", error);
-      alert('Error rejecting friend request.');
     }
   };
-
 
   if (!currentUser) {
     return (
@@ -302,13 +380,13 @@ const Chatpage = () => {
             <ul>
               {friendRequests.map(req => (
                 <li key={req.id} className="flex items-center justify-between p-4 hover:bg-[#161B22]">
-                   <div className="flex items-center">
-                      <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                      <div>
-                        <span className="font-bold">{req.name}</span>
-                        <span className="text-xs text-gray-400 block">{req.email}</span>
-                      </div>
+                  <div className="flex items-center">
+                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                    <div>
+                      <span className="font-bold">{req.name}</span>
+                      <span className="text-xs text-gray-400 block">{req.email}</span>
                     </div>
+                  </div>
                   <div className="flex space-x-2">
                     <button onClick={() => handleAcceptFriendRequest(req.id)} className="p-2 text-green-500 hover:bg-green-500 hover:text-black rounded">Accept</button>
                     <button onClick={() => handleRejectFriendRequest(req.id)} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Reject</button>
@@ -325,10 +403,13 @@ const Chatpage = () => {
                 <li
                   key={friend.id}
                   onClick={() => selectFriend(friend)}
-                  className={`p-4 flex items-center hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
+                  className={`p-4 flex items-center justify-between hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
                 >
-                  <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                  {friend.name}
+                  <div className="flex items-center">
+                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                    {friend.name}
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Remove</button>
                 </li>
               ))}
             </ul>
@@ -344,7 +425,6 @@ const Chatpage = () => {
             <div className="p-4 bg-[#0D1117]/50 border-b border-gray-800 flex items-center shadow-lg">
               <div className="relative">
                 <div className="w-10 h-10 rounded-full bg-teal-500/50 mr-4"></div>
-                {/* <div className="absolute bottom-0 right-4 w-3 h-3 bg-green-500 rounded-full border-2 border-[#0D1117] animate-pulse"></div> */}
               </div>
               <div>
                 <h2 className="text-xl font-semibold text-white">{activeChat.name}</h2>
@@ -354,31 +434,39 @@ const Chatpage = () => {
 
             {/* Messages */}
             <div className="flex-1 p-4 overflow-y-auto">
-              {Object.entries(groupMessagesByDate(messages)).map(([date, messagesForDate]) => (
-                <React.Fragment key={date}>
-                  <div className="text-center my-4">
-                    <span className="text-xs text-gray-500 bg-gray-800 px-2 py-1 rounded-full">{date}</span>
-                  </div>
-                  {messagesForDate.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
-                    >
-                      <div
-                        className={`p-3 rounded-xl max-w-md shadow-lg ${
-                          message.sender_id === currentUser.id
-                            ? 'bg-[#238636] text-white border border-[#00FF99]/50'
-                            : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'
-                        }`}
-                      >
-                        <div>{message.content}</div>
-                        <div className="text-xs text-gray-400 mt-1">{formatTime(message.timestamp)}</div>
+              {loadingMessages ? (
+                <div className="flex h-full items-center justify-center">
+                  <p>Loading messages...</p>
+                </div>
+              ) : (
+                <>
+                  {Object.entries(groupMessagesByDate(messages)).map(([date, messagesForDate]) => (
+                    <React.Fragment key={date}>
+                      <div className="text-center my-4">
+                        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-1 rounded-full">{date}</span>
                       </div>
-                    </div>
+                      {messagesForDate.map((message) => (
+                        <div
+                          key={message.id}
+                          className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
+                        >
+                          <div
+                            className={`p-3 rounded-xl max-w-md shadow-lg ${
+                              message.sender_id === currentUser.id
+                                ? 'bg-[#238636] text-white border border-[#00FF99]/50'
+                                : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'
+                            }`}
+                          >
+                            <div>{message.content}</div>
+                            <div className="text-xs text-gray-400 mt-1">{formatTime(message.timestamp)}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </React.Fragment>
                   ))}
-                </React.Fragment>
-              ))}
-              <div ref={messagesEndRef} />
+                  <div ref={messagesEndRef} />
+                </>
+              )}
             </div>
 
             {/* Message Input */}
@@ -394,7 +482,8 @@ const Chatpage = () => {
                 />
                 <button
                   onClick={handleSendMessage}
-                  className="p-3 bg-gradient-to-r from-teal-500 to-green-500 text-white rounded-r-lg hover:from-teal-600 hover:to-green-600"
+                  disabled={!newMessage.trim()}
+                  className="p-3 bg-gradient-to-r from-teal-500 to-green-500 text-white rounded-r-lg hover:from-teal-600 hover:to-green-600 disabled:opacity-50"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
