@@ -17,6 +17,21 @@ const Chatpage = () => {
   const [searchResults, setSearchResults] = useState([]);
   const messagesEndRef = useRef(null);
 
+  const groupMessagesByDate = (messages) => {
+    return messages.reduce((acc, message) => {
+      const date = new Date(message.timestamp).toLocaleDateString();
+      if (!acc[date]) {
+        acc[date] = [];
+      }
+      acc[date].push(message);
+      return acc;
+    }, {});
+  };
+
+  const formatTime = (timestamp) => {
+    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
   // Helper to create authenticated fetch requests
   const authFetch = (url, options = {}) => {
     return fetch(url, {
@@ -339,21 +354,29 @@ const Chatpage = () => {
 
             {/* Messages */}
             <div className="flex-1 p-4 overflow-y-auto">
-              {messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
-                >
-                  <div
-                    className={`p-3 rounded-xl max-w-md shadow-lg ${
-                      message.sender_id === currentUser.id
-                        ? 'bg-[#238636] text-white border border-[#00FF99]/50'
-                        : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'
-                    }`}
-                  >
-                    {message.content}
+              {Object.entries(groupMessagesByDate(messages)).map(([date, messagesForDate]) => (
+                <React.Fragment key={date}>
+                  <div className="text-center my-4">
+                    <span className="text-xs text-gray-500 bg-gray-800 px-2 py-1 rounded-full">{date}</span>
                   </div>
-                </div>
+                  {messagesForDate.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
+                    >
+                      <div
+                        className={`p-3 rounded-xl max-w-md shadow-lg ${
+                          message.sender_id === currentUser.id
+                            ? 'bg-[#238636] text-white border border-[#00FF99]/50'
+                            : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'
+                        }`}
+                      >
+                        <div>{message.content}</div>
+                        <div className="text-xs text-gray-400 mt-1">{formatTime(message.timestamp)}</div>
+                      </div>
+                    </div>
+                  ))}
+                </React.Fragment>
               ))}
               <div ref={messagesEndRef} />
             </div>
