@@ -12,6 +12,7 @@
     "body-parser": "^2.2.0",
     "concurrently": "^8.2.2",
     "connect-redis": "^9.0.0",
+    "connect-sqlite3": "^0.9.16",
     "cors": "^2.8.5",
     "cross-env": "^10.1.0",
     "express": "^5.1.0",

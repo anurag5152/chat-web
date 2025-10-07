@@ -1,49 +1,87 @@
+// database.js
 const sqlite3 = require('sqlite3').verbose();
+const fs = require('fs');
+const path = require('path');
 
-const db = new sqlite3.Database('./users.db', (err) => {
+const dataDir = path.join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+const dbFile = path.join(dataDir, 'app.sqlite');
+
+// open SQLite DB (file-backed)
+const db = new sqlite3.Database(dbFile, (err) => {
   if (err) {
-    console.error(err.message);
+    console.error('Failed to open SQLite DB', err);
+    process.exit(1);
+  } else {
+    console.log('Opened SQLite DB at', dbFile);
   }
-  console.log('Connected to the users database.');
 });
 
-const chatDb = new sqlite3.Database('./chat.db', (err) => {
-  if (err) {
-    console.error(err.message);
-  }
-  console.log('Connected to the chat database.');
-});
+// We'll use a single DB handle for both "db" and "chatDb" to avoid divergence
+const chatDb = db;
 
-/**
- * removeFriend: deletes the friendship rows (both directions) inside a transaction
- * and returns the number of rows deleted via callback (null, deletedCount) or (err).
- */
-const removeFriend = (userId, friendId, callback) => {
-  chatDb.serialize(() => {
-    chatDb.run("BEGIN TRANSACTION", (err) => {
-      if (err) return callback(err);
+// initialize schema (safe to call on every start)
+function initSchema() {
+  // users table (for auth)
+  db.run(
+    `CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL
+    );`
+  );
 
-      const deleteFriendSql = 'DELETE FROM friends WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)';
-      chatDb.run(deleteFriendSql, [userId, friendId, friendId, userId], function(err) {
-        if (err) {
-          // rollback and report error
-          return chatDb.run("ROLLBACK", () => callback(err));
-        }
+  // messages table
+  db.run(
+    `CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      sender_id INTEGER NOT NULL,
+      receiver_id INTEGER NOT NULL,
+      content TEXT,
+      timestamp TEXT,
+      FOREIGN KEY(sender_id) REFERENCES users(id),
+      FOREIGN KEY(receiver_id) REFERENCES users(id)
+    );`
+  );
 
-        // this.changes is the number of rows deleted by this run
-        const deleted = this.changes;
+  // friends table
+  db.run(
+    `CREATE TABLE IF NOT EXISTS friends (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      friend_id INTEGER NOT NULL,
+      UNIQUE(user_id, friend_id)
+    );`
+  );
 
-        chatDb.run("COMMIT", (err) => {
-          if (err) {
-            // try rollback and return error
-            return chatDb.run("ROLLBACK", () => callback(err));
-          }
-          // success: return number of rows deleted
-          callback(null, deleted);
-        });
-      });
-    });
+  // friend_requests table
+  db.run(
+    `CREATE TABLE IF NOT EXISTS friend_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender_id INTEGER NOT NULL,
+      receiver_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+    );`
+  );
+}
+
+initSchema();
+
+// helper to remove friendship (two-way)
+function removeFriend(userId, friendId, callback) {
+  const sql = `DELETE FROM friends
+               WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)`;
+  db.run(sql, [userId, friendId, friendId, userId], function (err) {
+    if (err) return callback(err);
+    return callback(null, this.changes);
   });
-};
+}
 
-module.exports = { db, chatDb, removeFriend };
+module.exports = {
+  db,
+  chatDb,
+  removeFriend
+};

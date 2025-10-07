@@ -1,4 +1,4 @@
-// server.js — full file, Redis removed for local/prototype usage
+// server.js — full file (SQLite session store using connect-sqlite3, no Redis)
 require('dotenv').config();
 
 const express = require('express');
@@ -7,10 +7,13 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const session = require('express-session');
-const { db, chatDb, removeFriend } = require('./database.js');
+const path = require('path');
+const fs = require('fs');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
-const path = require('path');
+
+// your database module (file-backed SQLite)
+const { db, chatDb, removeFriend } = require('./database.js');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,13 +21,19 @@ const server = http.createServer(app);
 /* -------------------- Config / env -------------------- */
 /**
  * NODE_ENV - 'production' in prod
- * FRONTEND_URL - deployed frontend (e.g. https://your-frontend.onrender.com)
+ * FRONTEND_URL - deployed frontend origin (e.g. https://your-frontend.onrender.com)
  * ADDITIONAL_ORIGINS - comma-separated additional allowed origins
+ * COOKIE_DOMAIN - optional cookie domain if you need cross-subdomain cookies
  */
-const { NODE_ENV, FRONTEND_URL, ADDITIONAL_ORIGINS } = process.env;
+const { NODE_ENV, FRONTEND_URL, ADDITIONAL_ORIGINS, COOKIE_DOMAIN } = process.env;
 const IS_PROD = NODE_ENV === 'production';
 
-if (IS_PROD) app.set('trust proxy', 1); // for secure cookies behind proxies
+/* If in prod behind a proxy, trust it so secure cookies and IPs work */
+if (IS_PROD) app.set('trust proxy', 1);
+
+/* -------------------- Data directory (ensure exists) -------------------- */
+const dataDir = path.join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 /* -------------------- CORS / allowed origins -------------------- */
 const allowedOriginsSet = new Set(
@@ -56,6 +65,7 @@ function isOriginAllowed(origin) {
   return false;
 }
 
+/* CORS middleware — allow credentials */
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -67,7 +77,7 @@ app.use(
   })
 );
 
-// preflight for all paths (use RegExp)
+// preflight for all routes
 app.options(
   /.*/,
   cors({
@@ -84,7 +94,7 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 /* -------------------- Global in-memory mapping -------------------- */
-// simple map userId -> socketId; kept in memory for single-instance fallback
+// userId -> socketId map (single-instance)
 const userSockets = {};
 
 /* -------------------- Socket.io instance -------------------- */
@@ -99,34 +109,52 @@ const io = socketIo(server, {
   },
 });
 
-/* -------------------- Session configuration (MemoryStore) -------------------- */
-/* NOTE: This uses the built-in MemoryStore from express-session.
-   MemoryStore is fine for local development / prototypes but not for production.
+/* -------------------- Session configuration (SQLite store) -------------------- */
+/* Use connect-sqlite3 to persist sessions to a SQLite table.
+   Sessions will be stored in data/app.sqlite (same folder as app DB files).
 */
+let SQLiteStore;
+try {
+  // connect-sqlite3 exports a factory that needs the session module
+  SQLiteStore = require('connect-sqlite3')(session);
+} catch (e) {
+  console.error('Missing dependency connect-sqlite3. Run: npm install connect-sqlite3 sqlite3');
+  process.exit(1);
+}
+
 const sessionOptions = {
   name: process.env.SESSION_NAME || 'sid',
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: IS_PROD, // true only in prod
-    sameSite: IS_PROD ? 'none' : 'lax',
+    secure: IS_PROD, // true only in production (HTTPS)
+    sameSite: IS_PROD ? 'none' : 'lax', // allow cross-site cookie in prod if frontend on different origin
     httpOnly: true,
     maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
   },
+  store: new SQLiteStore({
+    // store options:
+    db: 'app.sqlite',              // file name for session DB (we put it in ./data)
+    dir: dataDir,                 // directory where db file is created
+    table: 'sessions',            // table name
+    // optionally: concurrentDB: true  (varies with versions). Keep defaults.
+  }),
 };
 
-// create an explicit MemoryStore instance (for clarity)
-sessionOptions.store = new session.MemoryStore();
+// optional domain for cookie if you want cross-subdomain cookies
+if (COOKIE_DOMAIN) {
+  sessionOptions.cookie.domain = COOKIE_DOMAIN;
+}
+
 const finalSessionMiddleware = session(sessionOptions);
 
-// mount session middleware (important — before routes)
+// mount session middleware (must be before routes)
 app.use(finalSessionMiddleware);
 
-// ensure socket.io uses same session middleware — attach session to socket.request
+// attach same session middleware to socket.io (so socket.request.session is available)
 io.use((socket, next) => {
-  // express-session middleware expects (req, res, next). Socket's request doesn't have a proper res,
-  // but most session stores only need req and a dummy res. Provide a no-op res implementation.
+  // express-session expects req/res; socket.request doesn't have res -> provide fake
   const fakeRes = {
     getHeader() {},
     setHeader() {},
@@ -135,13 +163,11 @@ io.use((socket, next) => {
   finalSessionMiddleware(socket.request, fakeRes, next);
 });
 
-/* -------------------- Helper: mount routes & socket handlers -------------------- */
+/* -------------------- Routes & socket handlers -------------------- */
 function mountRoutesAndSockets() {
-  /* -------------------- small helper routes -------------------- */
   app.get('/health', (req, res) => res.send('OK'));
 
-  /* -------------------- API endpoints -------------------- */
-
+  /* -------------------- Auth endpoints -------------------- */
   app.post('/signup', async (req, res) => {
     const { name, email, password } = req.body;
     if (!name || !email || !password) return res.status(400).json({ error: 'All fields are required' });
@@ -151,7 +177,8 @@ function mountRoutesAndSockets() {
       const sql = 'INSERT INTO users (name, email, password) VALUES (?, ?, ?)';
       db.run(sql, [name, email, hashedPassword], function (err) {
         if (err) {
-          return res.status(400).json({ error: 'Email already exists' });
+          console.error('Signup DB error:', err);
+          return res.status(400).json({ error: 'Email already exists or DB error' });
         }
         req.session.userId = this.lastID;
         return res.redirect('/chatpage');
@@ -198,6 +225,7 @@ function mountRoutesAndSockets() {
     });
   });
 
+  /* -------------------- Session API -------------------- */
   app.get('/api/session', (req, res) => {
     if (req.session.userId) {
       const sql = 'SELECT id, name, email FROM users WHERE id = ?';
@@ -214,6 +242,7 @@ function mountRoutesAndSockets() {
     }
   });
 
+  /* -------------------- Friends / Requests / Users endpoints -------------------- */
   app.get('/api/friends', (req, res) => {
     if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
     const userId = req.session.userId;
@@ -453,9 +482,8 @@ function mountRoutesAndSockets() {
   });
 
   /* -------------------- Socket.io realtime -------------------- */
-
   io.on('connection', (socket) => {
-    // session was attached to socket.request by finalSessionMiddleware earlier via io.use
+    // session attached earlier by io.use
     const userId = socket.request && socket.request.session && socket.request.session.userId;
     if (userId) {
       userSockets[userId] = socket.id;
@@ -493,13 +521,14 @@ function mountRoutesAndSockets() {
       };
 
       const sql = 'INSERT INTO messages (id, sender_id, receiver_id, content, timestamp) VALUES (?, ?, ?, ?, ?)';
-      chatDb.run(sql, [message.id, message.sender_id, message.receiver_id, message.content, message.timestamp], (err) => {
+      chatDb.run(sql, [message.id, message.sender_id, message.receiver_id, message.content, message.timestamp], function (err) {
         if (err) {
           console.error('Error saving message:', err);
           if (callback) callback({ error: 'Failed to save message' });
           return;
         }
-        console.log('Message saved to database');
+
+        console.log('Message saved to database (id=', message.id, ')');
 
         const receiverSocketId = userSockets[to];
         if (receiverSocketId) {
@@ -517,7 +546,6 @@ function mountRoutesAndSockets() {
   });
 
   /* -------------------- Serve React build (static files) -------------------- */
-
   app.use(express.static(path.join(__dirname, 'build')));
 
   // fallback — use regexp and exclude /api and socket.io
@@ -526,21 +554,20 @@ function mountRoutesAndSockets() {
   });
 }
 
-/* -------------------- Start server (no Redis) -------------------- */
-
+/* -------------------- Start server -------------------- */
 function start() {
   try {
-    // Mount routes + sockets (session middleware already mounted)
     mountRoutesAndSockets();
 
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT} (NODE_ENV=${NODE_ENV || 'development'})`);
       console.log('Allowed CORS origins:', allowedOrigins);
-      console.log('Using in-memory session store (MemoryStore). This is fine for local development/prototype but NOT recommended for production.');
+      console.log(`Session cookie: secure=${sessionOptions.cookie.secure}, sameSite=${sessionOptions.cookie.sameSite}`);
+      console.log(`Sessions stored in: ${path.join(dataDir, 'app.sqlite')} (sessions table)`);
+      console.log('SQLite session store active (sessions persist across restarts).');
     });
 
-    // graceful shutdown
     const shutdown = async () => {
       console.log('Shutting down server...');
       try {
@@ -555,7 +582,6 @@ function start() {
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-
   } catch (err) {
     console.error('Startup error:', err);
     process.exit(1);

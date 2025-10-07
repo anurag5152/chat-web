@@ -3,11 +3,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 
-// NOTE: make sure this matches your server location
+// NOTE: make sure this matches your server location (set REACT_APP_SOCKET_URL in .env for deployed URL)
 const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
-
-// Initialize socket outside component so it persists across re-renders
-const socket = io(SOCKET_URL, { withCredentials: true, autoConnect: false });
 
 const Chatpage = () => {
   // State
@@ -23,8 +20,15 @@ const Chatpage = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
   const messagesEndRef = useRef(null);
 
-  const groupMessagesByDate = (messages) => {
-    return messages.reduce((acc, message) => {
+  // socket ref so it persists across renders
+  const socketRef = useRef(null);
+  // keep activeChat in a ref for stable access inside socket handlers
+  const activeChatRef = useRef(activeChat);
+
+  useEffect(() => { activeChatRef.current = activeChat; }, [activeChat]);
+
+  const groupMessagesByDate = (messagesList) => {
+    return messagesList.reduce((acc, message) => {
       const date = new Date(message.timestamp).toLocaleDateString();
       if (!acc[date]) acc[date] = [];
       acc[date].push(message);
@@ -46,6 +50,7 @@ const Chatpage = () => {
 
   // initial data load
   useEffect(() => {
+    let cancelled = false;
     const fetchData = async () => {
       try {
         const userRes = await authFetch('/api/session');
@@ -54,33 +59,50 @@ const Chatpage = () => {
           window.location.href = '/login';
           return;
         }
+        if (cancelled) return;
         setCurrentUser(userData.user);
 
         const friendsRes = await authFetch('/api/friends');
         const friendsData = await friendsRes.json();
-        setFriends(Array.isArray(friendsData) ? friendsData : []);
+        if (!cancelled) setFriends(Array.isArray(friendsData) ? friendsData : []);
 
         const requestsRes = await authFetch('/api/friend-requests');
         const requestsData = await requestsRes.json();
-        setFriendRequests(Array.isArray(requestsData) ? requestsData : []);
+        if (!cancelled) setFriendRequests(Array.isArray(requestsData) ? requestsData : []);
       } catch (error) {
         console.error('Failed to fetch initial data:', error);
       }
     };
 
     fetchData();
+    return () => { cancelled = true; };
   }, []);
 
-  // socket connect + core listeners (only when currentUser becomes available)
+  // socket connect + core listeners (create when currentUser becomes available)
   useEffect(() => {
     if (!currentUser) return;
 
-    // attach userId in auth for eventual debugging/identify if needed
-    socket.auth = { userId: currentUser.id };
-
-    if (!socket.connected) {
-      socket.connect();
+    // If socket already exists and connected with different user, disconnect and recreate
+    if (socketRef.current) {
+      try {
+        // If session/user changed (unlikely during normal flow), reconnect
+        socketRef.current.disconnect();
+      } catch (e) {
+        // ignore
+      }
+      socketRef.current = null;
     }
+
+    // create socket
+    const socket = io(SOCKET_URL, {
+      withCredentials: true,
+      autoConnect: true,
+      transports: ['websocket'], // prefer websocket to avoid polling handshake issues
+    });
+
+    socketRef.current = socket;
+    // attach auth info if desired (not required by server, but handy)
+    socket.auth = { userId: currentUser.id };
 
     const onConnect = () => console.log('Socket connected:', socket.id);
     const onConnectError = (err) => console.error('Socket connection error:', err);
@@ -90,7 +112,6 @@ const Chatpage = () => {
 
     // New incoming friend request
     const handleNewFriendRequest = (request) => {
-      // avoid duplicates
       setFriendRequests(prev => {
         if (prev.find(r => r.id === request.id)) return prev;
         return [request, ...prev];
@@ -120,37 +141,43 @@ const Chatpage = () => {
     };
     socket.on('friend_removed', handleFriendRemoved);
 
-    // cleanup
+    // Incoming private message handler (uses activeChatRef)
+    const handlePrivateMessage = (message) => {
+      // Avoid duplicates by id
+      setMessages(prevMessages => {
+        if (prevMessages.find(m => m.id === message.id)) return prevMessages;
+
+        // If message belongs to the active chat, append it
+        const currentActive = activeChatRef.current;
+        if (currentActive && (message.sender_id === currentActive.id || message.receiver_id === currentActive.id)) {
+          return [...prevMessages, message];
+        } else {
+          // Not the active chat: you may increment an unread counter here
+          console.log('Private message received for other chat', message);
+          return prevMessages;
+        }
+      });
+    };
+    socket.on('private_message', handlePrivateMessage);
+
+    // cleanup on unmount or currentUser change
     return () => {
-      socket.off('connect', onConnect);
-      socket.off('connect_error', onConnectError);
-      socket.off('new_friend_request', handleNewFriendRequest);
-      socket.off('friend_request_accepted', handleFriendRequestAccepted);
-      socket.off('friend_removed', handleFriendRemoved);
+      try {
+        socket.off('connect', onConnect);
+        socket.off('connect_error', onConnectError);
+        socket.off('new_friend_request', handleNewFriendRequest);
+        socket.off('friend_request_accepted', handleFriendRequestAccepted);
+        socket.off('friend_removed', handleFriendRemoved);
+        socket.off('private_message', handlePrivateMessage);
+        socket.disconnect();
+      } catch (e) {
+        // ignore
+      }
+      socketRef.current = null;
     };
   }, [currentUser]);
 
-  // incoming private messages handler
-  useEffect(() => {
-    const handlePrivateMessage = (message) => {
-      // If the message belongs to the currently active chat, append it
-      if (activeChat && (message.sender_id === activeChat.id || message.receiver_id === activeChat.id)) {
-        setMessages(prevMessages => {
-          // avoid duplicates by id
-          if (prevMessages.find(m => m.id === message.id)) return prevMessages;
-          return [...prevMessages, message];
-        });
-      } else {
-        // If not active chat, you could show unread counts here; for now we just log
-        console.log('Private message received for other chat', message);
-      }
-    };
-
-    socket.on('private_message', handlePrivateMessage);
-    return () => socket.off('private_message', handlePrivateMessage);
-  }, [activeChat]);
-
-  // auto-scroll
+  // auto-scroll when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -164,12 +191,13 @@ const Chatpage = () => {
       }
       try {
         const res = await authFetch(`/api/users/search?email=${encodeURIComponent(searchQuery)}`);
-        const data = await res.json();
-        if (res.ok) {
-          setSearchResults(data);
-        } else {
-          console.error('Failed to search users:', data.error);
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          console.error('Failed to search users:', data.error || res.statusText);
+          return;
         }
+        const data = await res.json();
+        setSearchResults(Array.isArray(data) ? data : []);
       } catch (error) {
         console.error('Error searching users:', error);
       }
@@ -186,17 +214,17 @@ const Chatpage = () => {
     setLoadingMessages(true);
     try {
       const res = await authFetch(`/api/messages/${friend.id}`);
-      const data = await res.json();
-      if (res.ok) {
-        setMessages(Array.isArray(data) ? data : []);
-      } else {
-        console.error('Failed to fetch messages:', data.error);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.error('Failed to fetch messages:', data.error || res.statusText);
+        return;
       }
+      const data = await res.json();
+      setMessages(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error fetching messages:', error);
     } finally {
       setLoadingMessages(false);
-      // close mobile drawer after selecting a friend
       setSidebarOpen(false);
     }
   };
@@ -204,6 +232,11 @@ const Chatpage = () => {
   // Robust send: optimistic UI + server replace (dedupe)
   const handleSendMessage = () => {
     if (!newMessage.trim() || !activeChat || !currentUser) return;
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) {
+      console.error('Socket not connected. Message not sent.');
+      return;
+    }
 
     // client temporary message id
     const tempId = uuidv4();
@@ -219,7 +252,8 @@ const Chatpage = () => {
     setMessages(prev => [...prev, optimisticMessage]);
 
     const messageData = {
-      id: tempId, // provide temp id so we can replace it after server ack
+      // server ignores client id, but we pass tempId so we can match on callback
+      id: tempId,
       content: newMessage,
       to: activeChat.id,
     };
@@ -228,17 +262,31 @@ const Chatpage = () => {
     socket.emit('private_message', messageData, (response) => {
       if (response && response.error) {
         console.error('Message failed to send:', response.error);
-        // Optionally mark the message as failed (not implemented visually here)
+        // Optionally mark the optimistic message as failed (not implemented visually here)
         return;
       }
       if (response && response.message) {
         const serverMsg = response.message;
-        // replace optimistic temp message with server message (by tempId)
         setMessages(prev => {
-          // if server already in list by id, ignore
-          if (prev.find(m => m.id === serverMsg.id)) return prev;
-          // replace the temp message with server message
-          return prev.map(m => (m.id === tempId ? serverMsg : m));
+          // If server message already present, remove temp if present
+          const already = prev.find(m => m.id === serverMsg.id);
+          if (already) {
+            // remove temp if exists
+            return prev.filter(m => m.id !== tempId);
+          }
+
+          // Replace temp message with server message (by tempId)
+          let replaced = false;
+          const mapped = prev.map(m => {
+            if (m.id === tempId) {
+              replaced = true;
+              return serverMsg;
+            }
+            return m;
+          });
+          if (replaced) return mapped;
+          // If temp wasn't found for some reason, append server message if not duplicate
+          return prev.find(m => m.id === serverMsg.id) ? prev : [...prev, serverMsg];
         });
       }
     });
@@ -282,10 +330,7 @@ const Chatpage = () => {
             name: acceptedRequest.name,
             email: acceptedRequest.email,
           };
-          setFriends(prev => {
-            if (prev.find(f => f.id === newFriend.id)) return prev;
-            return [newFriend, ...prev];
-          });
+          setFriends(prev => (prev.find(f => f.id === newFriend.id) ? prev : [newFriend, ...prev]));
         }
         setFriendRequests(prev => prev.filter(req => req.id !== requestId));
       } else {
@@ -338,6 +383,23 @@ const Chatpage = () => {
     }
   };
 
+  // Logout: call /logout endpoint to destroy server session, disconnect socket, redirect to login
+  const handleLogout = async () => {
+    try {
+      await authFetch('/logout', { method: 'GET' });
+    } catch (e) {
+      // ignore errors but continue to cleanup
+    } finally {
+      try {
+        if (socketRef.current) {
+          socketRef.current.disconnect();
+          socketRef.current = null;
+        }
+      } catch (e) { /* ignore */ }
+      window.location.href = '/login';
+    }
+  };
+
   if (!currentUser) {
     return (
       <div className="flex h-screen bg-gray-100 items-center justify-center">
@@ -348,7 +410,7 @@ const Chatpage = () => {
 
   return (
     <div className="flex h-screen bg-[#0D1117] text-[#E6EDF3] font-mono">
-      {/* Desktop Sidebar (unchanged) */}
+      {/* Desktop Sidebar */}
       <aside className="hidden md:flex w-1/4 bg-[#0D1117] border-r border-gray-800 flex-col shadow-inner">
         <div className="p-4 border-b border-gray-800">
           <input
@@ -479,7 +541,7 @@ const Chatpage = () => {
               {friends.map(friend => (
                 <li
                   key={friend.id}
-                  onClick={() => selectFriend(friend)}
+                  onClick={() => { selectFriend(friend); setSidebarOpen(false); }}
                   className={`p-4 flex items-center justify-between hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
                 >
                   <div className="flex items-center">
@@ -507,13 +569,12 @@ const Chatpage = () => {
         {/* Header */}
         <div className="p-4 bg-[#0D1117]/50 border-b border-gray-800 flex items-center shadow-lg justify-between">
           <div className="flex items-center space-x-3">
-            {/* hamburger only on mobile, placed inside header to avoid overlap */}
+            {/* hamburger only on mobile */}
             <button
               className="md:hidden p-2 bg-[#161B22] rounded-lg mr-1"
               onClick={() => setSidebarOpen(v => !v)}
               aria-label="Open menu"
             >
-              {/* simple hamburger icon */}
               <svg width="20" height="14" viewBox="0 0 24 24" fill="none" className="text-[#E6EDF3]">
                 <path d="M3 6h18M3 12h18M3 18h18" stroke="#E6EDF3" strokeWidth="1.6" strokeLinecap="round" />
               </svg>
@@ -530,7 +591,7 @@ const Chatpage = () => {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => { window.location.href = '/signup'; }}
+              onClick={handleLogout}
               className="text-sm px-3 py-1 rounded bg-[#161B22] hover:bg-[#161B22]/80 text-[#E6EDF3]"
             >
               Logout
@@ -559,11 +620,7 @@ const Chatpage = () => {
                           className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
                         >
                           <div
-                            className={`p-3 rounded-xl max-w-md shadow-lg ${
-                              message.sender_id === currentUser.id
-                                ? 'bg-[#238636] text-white border border-[#00FF99]/50'
-                                : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'
-                            }`}
+                            className={`p-3 rounded-xl max-w-md shadow-lg ${message.sender_id === currentUser.id ? 'bg-[#238636] text-white border border-[#00FF99]/50' : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'}`}
                           >
                             <div>{message.content}</div>
                             <div className="text-xs text-gray-400 mt-1">{formatTime(message.timestamp)}</div>
@@ -584,7 +641,7 @@ const Chatpage = () => {
                   type="text"
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
                   placeholder="Type a message..."
                   className="flex-1 p-3 bg-transparent rounded-l-lg focus:outline-none text-[#E6EDF3]"
                 />
