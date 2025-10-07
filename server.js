@@ -11,6 +11,7 @@ const FileStore = require('session-file-store')(session);
 const { db, chatDb, removeFriend } = require('./database.js');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -529,6 +530,16 @@ io.on('connection', (socket) => {
       }
     });
   });
+});
+
+// Serve React build (static files)
+app.use(express.static(path.join(__dirname, 'build')));
+
+// IMPORTANT: this must come after your API routes so API calls still work.
+// Use a RegExp literal (not a string) — this avoids path-to-regexp parsing errors.
+// The regex below excludes paths starting with /api and the socket.io path so those remain handled by their respective handlers.
+app.get(/^\/(?!api|socket\.io).*/, (req, res) => {
+  res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
 
 /* -------------------- Start server -------------------- */
