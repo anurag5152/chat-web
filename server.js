@@ -16,58 +16,98 @@ const app = express();
 const server = http.createServer(app);
 
 /**
- * Environment / runtime settings:
- * - NODE_ENV: 'production' in production
- * - FRONTEND_URL: main frontend URL (e.g. https://your-frontend.onrender.com)
- * - ADDITIONAL_ORIGINS: comma-separated extra origins if needed
- * - SESSION_SECRET: strong secret for sessions
+ * Env / runtime settings:
+ * NODE_ENV - 'production' in prod
+ * FRONTEND_URL - deployed frontend (e.g. https://your-frontend.onrender.com)
+ * ADDITIONAL_ORIGINS - comma-separated additional allowed origins
  */
 const { NODE_ENV, FRONTEND_URL, ADDITIONAL_ORIGINS } = process.env;
 
-// Trust proxy when in production (necessary for secure cookies behind proxies like Render)
-if (NODE_ENV === 'production') {
-  app.set('trust proxy', 1);
-}
+// Trust proxy when in production (for secure cookies behind Render, etc.)
+if (NODE_ENV === 'production') app.set('trust proxy', 1);
 
-// Build allowed origins list dynamically
-const allowedOriginsSet = new Set([
-  'http://localhost:3000',          // local dev
-  'http://127.0.0.1:3000',          // local dev alt
-  FRONTEND_URL,                     // production frontend (from env)
-  ...(ADDITIONAL_ORIGINS ? ADDITIONAL_ORIGINS.split(',') : []),
-].filter(Boolean)); // filter out undefined/null
-
+// Build base allowed origins (may include undefined if FRONTEND_URL not set)
+const allowedOriginsSet = new Set(
+  [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:3001',
+    FRONTEND_URL,
+    ...(ADDITIONAL_ORIGINS ? ADDITIONAL_ORIGINS.split(',') : []),
+  ].filter(Boolean)
+);
 const allowedOrigins = Array.from(allowedOriginsSet);
 
+/**
+ * Checks whether an Origin header should be allowed.
+ * Rules:
+ * - allow empty/undefined origin (server-to-server, curl, same-origin)
+ * - allow any localhost / 127.0.0.1 on any port (development convenience)
+ * - allow origin if it matches any explicitly allowed origin string
+ * - allow if origin hostname matches FRONTEND_URL hostname (useful when frontend served from same host with different port)
+ * - during development (NODE_ENV !== 'production'), allow 'null' origin (file:// / some dev envs)
+ */
 function isOriginAllowed(origin) {
-  // origin may be undefined for same-origin/server-to-server requests (allow those)
-  if (!origin) return true;
-  return allowedOriginsSet.has(origin);
+  if (!origin) return true; // no origin (same-origin or server-side call)
+
+  // In dev, some requests may send 'null' origin (file:// or sandbox). Allow in non-production.
+  if (origin === 'null' && NODE_ENV !== 'production') return true;
+
+  // exact match to an allowed origin string
+  if (allowedOriginsSet.has(origin)) return true;
+
+  // try parsing the origin to check hostname
+  try {
+    const parsed = new URL(origin);
+    const host = parsed.hostname;
+
+    // allow localhost or 127.0.0.1 on any port (dev convenience)
+    if (host === 'localhost' || host === '127.0.0.1') return true;
+
+    // allow if hostname matches FRONTEND_URL hostname
+    if (FRONTEND_URL) {
+      try {
+        const frontendHost = new URL(FRONTEND_URL).hostname;
+        if (frontendHost === host) return true;
+      } catch (e) {
+        // invalid FRONTEND_URL; ignore
+      }
+    }
+  } catch (e) {
+    // invalid origin string; fall through to disallow
+  }
+
+  return false;
 }
 
-// Express CORS middleware using function origin check
-app.use(cors({
-  origin: (origin, callback) => {
-    if (isOriginAllowed(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-}));
+// --- CORS middleware for Express ---
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      console.warn('[CORS] Blocked origin:', origin);
+      return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  })
+);
 
-// Preflight responses for safety
-app.options('*', cors({
-  origin: (origin, callback) => {
-    if (isOriginAllowed(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-}));
+// Use regex to accept preflight for any path (avoids '*' path-to-regexp bug)
+app.options(
+  /.*/,
+  cors({
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      console.warn('[CORS:OPTIONS] Blocked origin:', origin);
+      return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  })
+);
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -78,9 +118,9 @@ const sessionOptions = {
   name: process.env.SESSION_NAME || 'sid',
   secret: process.env.SESSION_SECRET || 'your-secret-key',
   resave: false,
-  saveUninitialized: false, // don't create session until something stored
+  saveUninitialized: false,
   cookie: {
-    secure: NODE_ENV === 'production', // true on HTTPS in production
+    secure: NODE_ENV === 'production', // true only in production (HTTPS)
     sameSite: NODE_ENV === 'production' ? 'none' : 'lax', // allow cross-site cookies in prod
     httpOnly: true,
     maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
@@ -90,34 +130,34 @@ const sessionOptions = {
 const sessionMiddleware = session(sessionOptions);
 app.use(sessionMiddleware);
 
-// socket.io initialization with cors that mirrors express behavior
+// --- socket.io with matching CORS behavior ---
 const io = socketIo(server, {
   cors: {
     origin: (origin, callback) => {
-      // socket.io may pass origin as undefined for non-browser connections
+      // socket.io might pass undefined origin for some non-browser connections
       if (isOriginAllowed(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
+        return callback(null, true);
       }
+      console.warn('[socket.io CORS] Blocked origin:', origin);
+      return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
   },
 });
 
-// Make express-session available in socket.request
+// Share express session with socket.io
 io.use((socket, next) => {
-  // Reuse the same session middleware instance for socket requests
   sessionMiddleware(socket.request, {}, next);
 });
+
+/* -------------------- small helper routes -------------------- */
+app.get('/health', (req, res) => res.send('OK'));
 
 /* -------------------- API endpoints -------------------- */
 
 app.post('/signup', async (req, res) => {
   const { name, email, password } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: 'All fields are required' });
-  }
+  if (!name || !email || !password) return res.status(400).json({ error: 'All fields are required' });
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -127,46 +167,47 @@ app.post('/signup', async (req, res) => {
         return res.status(400).json({ error: 'Email already exists' });
       }
       req.session.userId = this.lastID;
-      res.redirect('/chatpage');
+      return res.redirect('/chatpage');
     });
   } catch (error) {
-    res.status(500).json({ error: 'Server error' });
+    console.error('Signup error:', error);
+    return res.status(500).json({ error: 'Server error' });
   }
 });
 
 app.post('/login', (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required' });
-  }
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
 
   const sql = 'SELECT * FROM users WHERE email = ?';
   db.get(sql, [email], async (err, user) => {
     if (err) {
+      console.error('Login DB error:', err);
       return res.status(500).json({ error: 'Server error' });
     }
-    if (!user) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
+    if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
-    const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      return res.status(400).json({ error: 'Invalid credentials' });
-    }
+    try {
+      const match = await bcrypt.compare(password, user.password);
+      if (!match) return res.status(400).json({ error: 'Invalid credentials' });
 
-    req.session.userId = user.id;
-    res.redirect('/chatpage');
+      req.session.userId = user.id;
+      return res.redirect('/chatpage');
+    } catch (e) {
+      console.error('Login compare error:', e);
+      return res.status(500).json({ error: 'Server error' });
+    }
   });
 });
 
 app.get('/logout', (req, res) => {
   req.session.destroy((err) => {
     if (err) {
+      console.error('Logout destroy error:', err);
       return res.status(500).json({ error: 'Logout failed' });
     }
-    // Clear cookie client-side by setting minimal cookie with immediate expiry
     res.clearCookie(sessionOptions.name);
-    res.redirect('/login');
+    return res.redirect('/login');
   });
 });
 
@@ -175,33 +216,29 @@ app.get('/api/session', (req, res) => {
     const sql = 'SELECT id, name, email FROM users WHERE id = ?';
     db.get(sql, [req.session.userId], (err, user) => {
       if (err) {
+        console.error('/api/session db error:', err);
         return res.status(500).json({ error: 'Server error' });
       }
-      if (!user) {
-        return res.status(404).json({ loggedIn: false });
-      }
-      res.json({ loggedIn: true, user });
+      if (!user) return res.status(404).json({ loggedIn: false });
+      return res.json({ loggedIn: true, user });
     });
   } else {
-    res.json({ loggedIn: false });
+    return res.json({ loggedIn: false });
   }
 });
 
 app.get('/api/friends', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const userId = req.session.userId;
   const getFriendsIdsSql = 'SELECT friend_id FROM friends WHERE user_id = ?';
 
   chatDb.all(getFriendsIdsSql, [userId], (err, friendRows) => {
     if (err) {
+      console.error('/api/friends db error:', err);
       return res.status(500).json({ error: 'Server error getting friend IDs' });
     }
 
-    if (!friendRows || friendRows.length === 0) {
-      return res.json([]);
-    }
+    if (!friendRows || friendRows.length === 0) return res.json([]);
 
     const friendIds = friendRows.map(row => row.friend_id);
     const placeholders = friendIds.map(() => '?').join(',');
@@ -209,28 +246,26 @@ app.get('/api/friends', (req, res) => {
 
     db.all(getUsersSql, friendIds, (err, userRows) => {
       if (err) {
+        console.error('/api/friends userRows error:', err);
         return res.status(500).json({ error: 'Server error getting friend details' });
       }
-      res.json(userRows);
+      return res.json(userRows);
     });
   });
 });
 
 app.get('/api/friend-requests', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const userId = req.session.userId;
   const getRequestsSql = "SELECT id, sender_id FROM friend_requests WHERE receiver_id = ? AND status = 'pending'";
 
   chatDb.all(getRequestsSql, [userId], (err, requests) => {
     if (err) {
+      console.error('/api/friend-requests db error:', err);
       return res.status(500).json({ error: 'Server error getting friend requests' });
     }
 
-    if (!requests || requests.length === 0) {
-      return res.json([]);
-    }
+    if (!requests || requests.length === 0) return res.json([]);
 
     const senderIds = requests.map(r => r.sender_id);
     const placeholders = senderIds.map(() => '?').join(',');
@@ -238,6 +273,7 @@ app.get('/api/friend-requests', (req, res) => {
 
     db.all(getUsersSql, senderIds, (err, users) => {
       if (err) {
+        console.error('/api/friend-requests users error:', err);
         return res.status(500).json({ error: 'Server error getting user details' });
       }
 
@@ -251,39 +287,35 @@ app.get('/api/friend-requests', (req, res) => {
         };
       });
 
-      res.json(friendRequests);
+      return res.json(friendRequests);
     });
   });
 });
 
 app.post('/api/friend-request', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const senderId = req.session.userId;
   const { email } = req.body;
 
   db.get('SELECT id FROM users WHERE email = ?', [email], (err, user) => {
     if (err) {
+      console.error('/api/friend-request db error:', err);
       return res.status(500).json({ error: 'Server error' });
     }
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
+    if (!user) return res.status(404).json({ error: 'User not found' });
     const receiverId = user.id;
 
-    // Check if they are already friends
     chatDb.get('SELECT * FROM friends WHERE user_id = ? AND friend_id = ?', [senderId, receiverId], (err, friendship) => {
       if (err) {
+        console.error('/api/friend-request friendship check error:', err);
         return res.status(500).json({ error: 'Server error while checking friendship' });
       }
-      if (friendship) {
-        return res.status(400).json({ error: 'You are already friends with this user' });
-      }
+      if (friendship) return res.status(400).json({ error: 'You are already friends with this user' });
 
       const sql = 'INSERT INTO friend_requests (sender_id, receiver_id, status) VALUES (?, ?, ?)';
-      chatDb.run(sql, [senderId, receiverId, 'pending'], function(err) {
+      chatDb.run(sql, [senderId, receiverId, 'pending'], function (err) {
         if (err) {
+          console.error('/api/friend-request insert error:', err);
           return res.status(500).json({ error: 'Failed to send friend request' });
         }
         const receiverSocketId = userSockets[receiverId];
@@ -294,17 +326,15 @@ app.post('/api/friend-request', (req, res) => {
             }
           });
         }
-        res.status(201).json({ message: 'Friend request sent' });
+        return res.status(201).json({ message: 'Friend request sent' });
       });
     });
   });
 });
 
 app.post('/api/friend-request/accept', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  const userId = req.session.userId; // the one who accepted
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+  const userId = req.session.userId;
   const { requestId } = req.body;
 
   chatDb.get('SELECT * FROM friend_requests WHERE id = ? AND receiver_id = ?', [requestId, userId], (err, request) => {
@@ -314,15 +344,15 @@ app.post('/api/friend-request/accept', (req, res) => {
 
     const senderId = request.sender_id;
 
-    // Check if they are already friends
     chatDb.get('SELECT * FROM friends WHERE user_id = ? AND friend_id = ?', [userId, senderId], (err, friendship) => {
       if (err) {
+        console.error('/api/friend-request accept friendship check error:', err);
         return res.status(500).json({ error: 'Server error while checking friendship' });
       }
       if (friendship) {
-        // They are already friends, so just update the request status
         chatDb.run('UPDATE friend_requests SET status = "accepted" WHERE id = ?', [requestId], (err) => {
           if (err) {
+            console.error('/api/friend-request accept update error:', err);
             return res.status(500).json({ error: 'Failed to accept friend request' });
           }
           return res.status(200).json({ message: 'Friend request accepted, already friends' });
@@ -330,19 +360,18 @@ app.post('/api/friend-request/accept', (req, res) => {
         return;
       }
 
-      // If not already friends, proceed to add
       chatDb.run('UPDATE friend_requests SET status = "accepted" WHERE id = ?', [requestId], (err) => {
         if (err) {
+          console.error('/api/friend-request accept update error:', err);
           return res.status(500).json({ error: 'Failed to accept friend request' });
         }
 
-        // Insert friendship both directions
         chatDb.run('INSERT INTO friends (user_id, friend_id) VALUES (?, ?), (?, ?)', [userId, senderId, senderId, userId], (err) => {
           if (err) {
+            console.error('/api/friend-request insert friends error:', err);
             return res.status(500).json({ error: 'Failed to add friend' });
           }
 
-          // Notify the original sender (who sent the request)
           const senderSocketId = userSockets[senderId];
           if (senderSocketId) {
             db.get('SELECT id, name, email FROM users WHERE id = ?', [userId], (err, user) => {
@@ -352,7 +381,7 @@ app.post('/api/friend-request/accept', (req, res) => {
             });
           }
 
-          res.status(200).json({ message: 'Friend request accepted' });
+          return res.status(200).json({ message: 'Friend request accepted' });
         });
       });
     });
@@ -360,82 +389,65 @@ app.post('/api/friend-request/accept', (req, res) => {
 });
 
 app.post('/api/friends/remove', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const userId = req.session.userId;
   const { friendId } = req.body;
 
-  if (!friendId) {
-    return res.status(400).json({ error: 'Friend ID is required' });
-  }
+  if (!friendId) return res.status(400).json({ error: 'Friend ID is required' });
 
   removeFriend(userId, friendId, (err, deletedCount) => {
     if (err) {
+      console.error('/api/friends/remove error:', err);
       return res.status(500).json({ error: 'Failed to remove friend' });
     }
-    if (!deletedCount || deletedCount === 0) {
-      return res.status(404).json({ error: 'Friendship not found' });
-    }
+    if (!deletedCount || deletedCount === 0) return res.status(404).json({ error: 'Friendship not found' });
 
-    // Delete the chat history (best-effort)
     const deleteMessagesSql = 'DELETE FROM messages WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)';
     chatDb.run(deleteMessagesSql, [userId, friendId, friendId, userId], (err) => {
-      if (err) {
-        console.error("Error deleting chat history:", err);
-      }
+      if (err) console.error('Error deleting chat history:', err);
 
-      // Notify the removed friend (so their UI updates without refresh)
       const removedUserSocketId = userSockets[friendId];
       if (removedUserSocketId) {
         io.to(removedUserSocketId).emit('friend_removed', { friendId: userId });
       }
 
-      res.status(200).json({ message: 'Friend removed successfully' });
+      return res.status(200).json({ message: 'Friend removed successfully' });
     });
   });
 });
 
 app.post('/api/friend-request/reject', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const userId = req.session.userId;
   const { requestId } = req.body;
 
-  chatDb.run('UPDATE friend_requests SET status = "rejected" WHERE id = ? AND receiver_id = ?', [requestId, userId], function(err) {
+  chatDb.run('UPDATE friend_requests SET status = "rejected" WHERE id = ? AND receiver_id = ?', [requestId, userId], function (err) {
     if (err) {
+      console.error('/api/friend-request/reject error:', err);
       return res.status(500).json({ error: 'Failed to reject friend request' });
     }
-    if (this.changes === 0) {
-      return res.status(404).json({ error: 'Friend request not found' });
-    }
-    res.status(200).json({ message: 'Friend request rejected' });
+    if (this.changes === 0) return res.status(404).json({ error: 'Friend request not found' });
+    return res.status(200).json({ message: 'Friend request rejected' });
   });
 });
 
 app.get('/api/users/search', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const { email } = req.query;
-  if (!email) {
-    return res.status(400).json({ error: 'Email query parameter is required' });
-  }
+  if (!email) return res.status(400).json({ error: 'Email query parameter is required' });
 
   const sql = 'SELECT id, name, email FROM users WHERE email LIKE ?';
   db.all(sql, [`%${email}%`], (err, rows) => {
     if (err) {
+      console.error('/api/users/search error:', err);
       return res.status(500).json({ error: 'Server error' });
     }
-    res.json(rows);
+    return res.json(rows);
   });
 });
 
 app.get('/api/messages/:friendId', (req, res) => {
-  if (!req.session.userId) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
   const userId = req.session.userId;
   const friendId = req.params.friendId;
 
@@ -446,9 +458,10 @@ app.get('/api/messages/:friendId', (req, res) => {
   `;
   chatDb.all(sql, [userId, friendId, friendId, userId], (err, rows) => {
     if (err) {
+      console.error('/api/messages error:', err);
       return res.status(500).json({ error: 'Server error' });
     }
-    res.json(rows);
+    return res.json(rows);
   });
 });
 
@@ -512,7 +525,6 @@ io.on('connection', (socket) => {
       }
 
       if (callback) {
-        // send the saved message back to sender (so client can replace optimistic message)
         callback({ message });
       }
     });
@@ -523,6 +535,14 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`Server listening on port ${PORT} (NODE_ENV=${NODE_ENV || 'development'})`);
   console.log('Allowed CORS origins:', allowedOrigins);
+});
+
+// Basic uncaught exception logging so startup crashes are visible
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason, p) => {
+  console.error('Unhandled Rejection at: Promise', p, 'reason:', reason);
 });
