@@ -1,4 +1,4 @@
-// server.js — full file, complete, no omissions
+// server.js — full file, Redis removed for local/prototype usage
 require('dotenv').config();
 
 const express = require('express');
@@ -7,9 +7,6 @@ const socketIo = require('socket.io');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const session = require('express-session');
-const connectRedisPkg = require('connect-redis'); // may be function or object.default
-const { createClient: createRedisClient } = require('redis');
-const { createAdapter: createRedisAdapter } = require('@socket.io/redis-adapter');
 const { db, chatDb, removeFriend } = require('./database.js');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
@@ -23,9 +20,8 @@ const server = http.createServer(app);
  * NODE_ENV - 'production' in prod
  * FRONTEND_URL - deployed frontend (e.g. https://your-frontend.onrender.com)
  * ADDITIONAL_ORIGINS - comma-separated additional allowed origins
- * REDIS_URL - redis connection string (e.g. redis://:password@host:port)
  */
-const { NODE_ENV, FRONTEND_URL, ADDITIONAL_ORIGINS, REDIS_URL } = process.env;
+const { NODE_ENV, FRONTEND_URL, ADDITIONAL_ORIGINS } = process.env;
 const IS_PROD = NODE_ENV === 'production';
 
 if (IS_PROD) app.set('trust proxy', 1); // for secure cookies behind proxies
@@ -91,35 +87,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 // simple map userId -> socketId; kept in memory for single-instance fallback
 const userSockets = {};
 
-/* -------------------- Redis clients (created early, connect later) -------------------- */
-const redisUrl = REDIS_URL || 'redis://localhost:6379';
-let redisClient = null;
-let redisClientDup = null;
-let redisAvailable = false;
-
-/* create clients but do not assume they will connect */
-try {
-  redisClient = createRedisClient({ url: redisUrl });
-  // duplicate may be a function in redis@4
-  redisClientDup = typeof redisClient.duplicate === 'function' ? redisClient.duplicate() : createRedisClient({ url: redisUrl });
-} catch (e) {
-  console.warn('Redis client creation warning:', e && e.message ? e.message : e);
-  redisClient = null;
-  redisClientDup = null;
-}
-
-/* -------------------- connect-redis compatibility -------------------- */
-/* connectRedis may export:
-   - function(session) => StoreClass  (older)
-   - object with .default being StoreClass (ESM build)
-   We will detect the shape at runtime after a successful redis connection.
-*/
-let RedisStoreClassCandidate = connectRedisPkg;
-
-/* -------------------- We'll create session store after Redis connects (or fallback) -------------------- */
-let finalSessionMiddleware; // will be set after store created
-
-/* -------------------- Socket.io instance (adapter attached later) -------------------- */
+/* -------------------- Socket.io instance -------------------- */
 const io = socketIo(server, {
   cors: {
     origin: (origin, callback) => {
@@ -129,6 +97,42 @@ const io = socketIo(server, {
     },
     credentials: true,
   },
+});
+
+/* -------------------- Session configuration (MemoryStore) -------------------- */
+/* NOTE: This uses the built-in MemoryStore from express-session.
+   MemoryStore is fine for local development / prototypes but not for production.
+*/
+const sessionOptions = {
+  name: process.env.SESSION_NAME || 'sid',
+  secret: process.env.SESSION_SECRET || 'your-secret-key',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: IS_PROD, // true only in prod
+    sameSite: IS_PROD ? 'none' : 'lax',
+    httpOnly: true,
+    maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+  },
+};
+
+// create an explicit MemoryStore instance (for clarity)
+sessionOptions.store = new session.MemoryStore();
+const finalSessionMiddleware = session(sessionOptions);
+
+// mount session middleware (important — before routes)
+app.use(finalSessionMiddleware);
+
+// ensure socket.io uses same session middleware — attach session to socket.request
+io.use((socket, next) => {
+  // express-session middleware expects (req, res, next). Socket's request doesn't have a proper res,
+  // but most session stores only need req and a dummy res. Provide a no-op res implementation.
+  const fakeRes = {
+    getHeader() {},
+    setHeader() {},
+    end() {},
+  };
+  finalSessionMiddleware(socket.request, fakeRes, next);
 });
 
 /* -------------------- Helper: mount routes & socket handlers -------------------- */
@@ -522,158 +526,38 @@ function mountRoutesAndSockets() {
   });
 }
 
-/* -------------------- Start server (connect Redis, instantiate store, mount session) -------------------- */
+/* -------------------- Start server (no Redis) -------------------- */
 
-const sessionOptions = {
-  name: process.env.SESSION_NAME || 'sid',
-  secret: process.env.SESSION_SECRET || 'your-secret-key',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: IS_PROD, // true only in prod
-    sameSite: IS_PROD ? 'none' : 'lax',
-    httpOnly: true,
-    maxAge: 1000 * 60 * 60 * 24 * 7,
-  },
-};
-
-async function start() {
+function start() {
   try {
-    // Try to connect Redis (if client exists)
-    if (redisClient) {
-      try {
-        await redisClient.connect();
-        // duplicate client connect if available
-        if (redisClientDup && typeof redisClientDup.connect === 'function') {
-          await redisClientDup.connect();
-        }
-        redisAvailable = true;
-        console.log('Connected to Redis at', redisUrl);
-      } catch (err) {
-        // couldn't connect to redis — fallback to in-memory store
-        redisAvailable = false;
-        console.warn('Could not connect to Redis, falling back to in-memory session store. Error:', err && err.message ? err.message : err);
-      }
-    } else {
-      console.warn('Redis client not created; running without Redis.');
-      redisAvailable = false;
-    }
-
-    // instantiate session store
-    let sessionStoreInstance = null;
-    if (redisAvailable && RedisStoreClassCandidate) {
-      // detect export shape of connect-redis
-      let RedisStoreClass = null;
-      try {
-        if (typeof RedisStoreClassCandidate === 'function') {
-          // this might be the factory: require('connect-redis')(session)
-          // or might be the Store class directly (older/newer libs vary)
-          try {
-            RedisStoreClass = RedisStoreClassCandidate(session); // if factory, returns Store
-          } catch (e) {
-            // not a factory; maybe it's already a Store constructor
-            RedisStoreClass = RedisStoreClassCandidate;
-          }
-        } else if (RedisStoreClassCandidate && typeof RedisStoreClassCandidate.default === 'function') {
-          RedisStoreClass = RedisStoreClassCandidate.default(session);
-        } else if (RedisStoreClassCandidate && typeof RedisStoreClassCandidate.default === 'object') {
-          RedisStoreClass = RedisStoreClassCandidate.default;
-        } else {
-          RedisStoreClass = RedisStoreClassCandidate;
-        }
-      } catch (e) {
-        console.warn('Could not detect connect-redis shape automatically, trying fallback. Error:', e && e.message ? e.message : e);
-        RedisStoreClass = (RedisStoreClassCandidate && RedisStoreClassCandidate.default) ? RedisStoreClassCandidate.default : RedisStoreClassCandidate;
-      }
-
-      // instantiate (two attempts to handle differences)
-      try {
-        sessionStoreInstance = new RedisStoreClass({ client: redisClient, prefix: 'sess:' });
-      } catch (e) {
-        try {
-          sessionStoreInstance = RedisStoreClass({ client: redisClient, prefix: 'sess:' });
-        } catch (err2) {
-          console.error('Failed to instantiate Redis session store. Falling back to memory store. Errors:', e, err2);
-          sessionStoreInstance = null;
-          redisAvailable = false;
-        }
-      }
-    }
-
-    // If Redis session store not available, fall back to default MemoryStore (development only)
-    if (!sessionStoreInstance) {
-      console.warn('Using in-memory session store. THIS IS NOT SUITABLE FOR PRODUCTION.');
-      // express-session provides MemoryStore via session.Store implicitly when no store is specified
-      // but we can explicitly set it for clarity:
-      const MemoryStore = session.MemoryStore;
-      sessionOptions.store = new MemoryStore();
-    } else {
-      sessionOptions.store = sessionStoreInstance;
-    }
-
-    sessionOptions.name = sessionOptions.name || process.env.SESSION_NAME || 'sid';
-    finalSessionMiddleware = session(sessionOptions);
-
-    // mount session middleware (important — before routes)
-    app.use(finalSessionMiddleware);
-
-    // ensure socket.io uses same session middleware — attach session to socket.request
-    io.use((socket, next) => {
-      // express-session middleware expects (req, res, next). Socket's request doesn't have a proper res,
-      // but most session stores only need req and a dummy res. Provide an object with a no-op end method.
-      const fakeRes = {
-        getHeader() {},
-        setHeader() {},
-        end() {},
-      };
-      finalSessionMiddleware(socket.request, fakeRes, next);
-    });
-
-    // attach redis adapter to socket.io for multi-instance if Redis available
-    if (redisAvailable && redisClient && redisClientDup) {
-      try {
-        io.adapter(createRedisAdapter(redisClient, redisClientDup));
-        console.log('Attached Redis adapter to socket.io');
-      } catch (e) {
-        console.warn('Failed to attach Redis adapter to socket.io — continuing without adapter. Error:', e && e.message ? e.message : e);
-      }
-    } else {
-      console.log('Redis not available — socket.io will run without Redis adapter (single-instance only).');
-    }
-
-    // mount routes + socket handlers now that session is available
+    // Mount routes + sockets (session middleware already mounted)
     mountRoutesAndSockets();
 
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT} (NODE_ENV=${NODE_ENV || 'development'})`);
       console.log('Allowed CORS origins:', allowedOrigins);
-      if (!redisAvailable) {
-        console.log('WARNING: Redis unavailable — using in-memory session store. Not for production.');
-      }
+      console.log('Using in-memory session store (MemoryStore). This is fine for local development/prototype but NOT recommended for production.');
     });
 
     // graceful shutdown
     const shutdown = async () => {
       console.log('Shutting down server...');
       try {
-        if (redisAvailable && redisClient) {
-          await redisClient.quit();
-        }
-        if (redisAvailable && redisClientDup && redisClientDup.quit) {
-          await redisClientDup.quit();
-        }
+        server.close(() => {
+          console.log('HTTP server closed.');
+          process.exit(0);
+        });
       } catch (e) {
-        console.warn('Error while closing Redis clients', e);
+        console.warn('Error during shutdown', e);
+        process.exit(1);
       }
-      server.close(() => process.exit(0));
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
 
   } catch (err) {
-    console.error('Startup error (Redis/socket adapter/session store):', err);
-    // If you are running locally and don't want to use Redis, run without REDIS_URL or ensure NODE_ENV != 'production'.
+    console.error('Startup error:', err);
     process.exit(1);
   }
 }
