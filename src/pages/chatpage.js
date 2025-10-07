@@ -1,3 +1,4 @@
+// Chatpage.jsx
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
@@ -19,6 +20,7 @@ const Chatpage = () => {
   const [newMessage, setNewMessage] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
   const messagesEndRef = useRef(null);
 
   const groupMessagesByDate = (messages) => {
@@ -62,7 +64,7 @@ const Chatpage = () => {
         const requestsData = await requestsRes.json();
         setFriendRequests(Array.isArray(requestsData) ? requestsData : []);
       } catch (error) {
-        console.error("Failed to fetch initial data:", error);
+        console.error('Failed to fetch initial data:', error);
       }
     };
 
@@ -166,10 +168,10 @@ const Chatpage = () => {
         if (res.ok) {
           setSearchResults(data);
         } else {
-          console.error("Failed to search users:", data.error);
+          console.error('Failed to search users:', data.error);
         }
       } catch (error) {
-        console.error("Error searching users:", error);
+        console.error('Error searching users:', error);
       }
     };
 
@@ -188,12 +190,14 @@ const Chatpage = () => {
       if (res.ok) {
         setMessages(Array.isArray(data) ? data : []);
       } else {
-        console.error("Failed to fetch messages:", data.error);
+        console.error('Failed to fetch messages:', data.error);
       }
     } catch (error) {
-      console.error("Error fetching messages:", error);
+      console.error('Error fetching messages:', error);
     } finally {
       setLoadingMessages(false);
+      // close mobile drawer after selecting a friend
+      setSidebarOpen(false);
     }
   };
 
@@ -257,7 +261,7 @@ const Chatpage = () => {
         console.error(`Failed to send friend request: ${data.error}`);
       }
     } catch (error) {
-      console.error("Error sending friend request:", error);
+      console.error('Error sending friend request:', error);
     }
   };
 
@@ -288,7 +292,7 @@ const Chatpage = () => {
         console.error(`Failed to accept friend request: ${data.error}`);
       }
     } catch (error) {
-      console.error("Error accepting friend request:", error);
+      console.error('Error accepting friend request:', error);
     }
   };
 
@@ -311,7 +315,7 @@ const Chatpage = () => {
         console.error(`Failed to remove friend: ${data.error}`);
       }
     } catch (error) {
-      console.error("Error removing friend:", error);
+      console.error('Error removing friend:', error);
     }
   };
 
@@ -330,7 +334,7 @@ const Chatpage = () => {
         console.error(`Failed to reject friend request: ${data.error}`);
       }
     } catch (error) {
-      console.error("Error rejecting friend request:", error);
+      console.error('Error rejecting friend request:', error);
     }
   };
 
@@ -344,8 +348,8 @@ const Chatpage = () => {
 
   return (
     <div className="flex h-screen bg-[#0D1117] text-[#E6EDF3] font-mono">
-      {/* Sidebar */}
-      <div className="w-full md:w-1/4 bg-[#0D1117] border-r border-gray-800 flex flex-col shadow-inner">
+      {/* Desktop Sidebar (unchanged) */}
+      <aside className="hidden md:flex w-1/4 bg-[#0D1117] border-r border-gray-800 flex-col shadow-inner">
         <div className="p-4 border-b border-gray-800">
           <input
             type="text"
@@ -407,7 +411,7 @@ const Chatpage = () => {
                 >
                   <div className="flex items-center">
                     <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                    {friend.name}
+                    <div className="truncate">{friend.name}</div>
                   </div>
                   <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Remove</button>
                 </li>
@@ -415,23 +419,127 @@ const Chatpage = () => {
             </ul>
           ) : <p className="px-4 text-gray-500">Add some friends to start chatting.</p>}
         </div>
+      </aside>
+
+      {/* Mobile Sidebar Drawer */}
+      <div className={`fixed inset-y-0 left-0 z-40 w-3/4 max-w-xs transform bg-[#0D1117] border-r border-gray-800 shadow-lg transition-transform duration-200 md:hidden ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="p-4 border-b border-gray-800">
+          <input
+            type="text"
+            placeholder="Search by email"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full p-2 bg-[#161B22] border border-[#00FF99] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#00FF99] text-[#E6EDF3]"
+          />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {searchResults.length > 0 && (
+            <div>
+              <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Search Results</h2>
+              <ul>
+                {searchResults.map(user => (
+                  <li key={user.id} className="flex items-center justify-between p-4 hover:bg-[#161B22] cursor-pointer">
+                    <div className="flex items-center">
+                      <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                      <div>
+                        <span className="font-bold">{user.name}</span>
+                        <span className="text-xs text-gray-400 block">{user.email}</span>
+                      </div>
+                    </div>
+                    <button onClick={() => { handleSendFriendRequest(user.email); setSidebarOpen(false); }} className="p-2 text-[#00FF99] hover:bg-[#00FF99] hover:text-black rounded">Add</button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friend Requests</h2>
+          {friendRequests.length > 0 ? (
+            <ul>
+              {friendRequests.map(req => (
+                <li key={req.id} className="flex items-center justify-between p-4 hover:bg-[#161B22]">
+                  <div className="flex items-center">
+                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                    <div>
+                      <span className="font-bold">{req.name}</span>
+                      <span className="text-xs text-gray-400 block">{req.email}</span>
+                    </div>
+                  </div>
+                  <div className="flex space-x-2">
+                    <button onClick={() => { handleAcceptFriendRequest(req.id); setSidebarOpen(false); }} className="p-2 text-green-500 hover:bg-green-500 hover:text-black rounded">Accept</button>
+                    <button onClick={() => { handleRejectFriendRequest(req.id); setSidebarOpen(false); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Reject</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="px-4 text-gray-500">No new requests.</p>}
+
+          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friends</h2>
+          {friends.length > 0 ? (
+            <ul>
+              {friends.map(friend => (
+                <li
+                  key={friend.id}
+                  onClick={() => selectFriend(friend)}
+                  className={`p-4 flex items-center justify-between hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
+                >
+                  <div className="flex items-center">
+                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
+                    <div className="truncate">{friend.name}</div>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id); setSidebarOpen(false); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Remove</button>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="px-4 text-gray-500">Add some friends to start chatting.</p>}
+        </div>
       </div>
+
+      {/* overlay for mobile drawer */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col bg-[#0D1117]">
+        {/* Header */}
+        <div className="p-4 bg-[#0D1117]/50 border-b border-gray-800 flex items-center shadow-lg justify-between">
+          <div className="flex items-center space-x-3">
+            {/* hamburger only on mobile, placed inside header to avoid overlap */}
+            <button
+              className="md:hidden p-2 bg-[#161B22] rounded-lg mr-1"
+              onClick={() => setSidebarOpen(v => !v)}
+              aria-label="Open menu"
+            >
+              {/* simple hamburger icon */}
+              <svg width="20" height="14" viewBox="0 0 24 24" fill="none" className="text-[#E6EDF3]">
+                <path d="M3 6h18M3 12h18M3 18h18" stroke="#E6EDF3" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+            </button>
+
+            <div className="relative">
+              <div className="w-10 h-10 rounded-full bg-teal-500/50 mr-4" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-xl font-semibold text-white truncate">{activeChat ? activeChat.name : currentUser.name}</h2>
+              <p className="text-sm text-[#8B949E] truncate">{activeChat ? activeChat.email : currentUser.email}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { window.location.href = '/signup'; }}
+              className="text-sm px-3 py-1 rounded bg-[#161B22] hover:bg-[#161B22]/80 text-[#E6EDF3]"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
+
         {activeChat ? (
           <>
-            {/* Chat Header */}
-            <div className="p-4 bg-[#0D1117]/50 border-b border-gray-800 flex items-center shadow-lg">
-              <div className="relative">
-                <div className="w-10 h-10 rounded-full bg-teal-500/50 mr-4"></div>
-              </div>
-              <div>
-                <h2 className="text-xl font-semibold text-white">{activeChat.name}</h2>
-                <p className="text-sm text-[#8B949E]">{activeChat.email}</p>
-              </div>
-            </div>
-
             {/* Messages */}
             <div className="flex-1 p-4 overflow-y-auto">
               {loadingMessages ? (

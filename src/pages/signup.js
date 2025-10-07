@@ -33,6 +33,17 @@ export default function Signup() {
           transition={{ duration: 0.9, ease: "easeOut" }}
           className="flex-1 text-left space-y-4 sm:pr-10 mb-10 sm:mb-0"
         >
+          <div className="flex items-center space-x-1 mb-3">
+            <h2 className="text-5xl sm:text-6xl font-extrabold text-[#00FF99] tracking-tight flex items-center">
+              <span>Chatbo</span>
+              <img
+                src="/favicon.ico"
+                alt="logo"
+                className="w-8 h-18 mx-1 inline-block align-middle"
+              />
+              <span>t</span>
+            </h2>
+          </div>
           <h1 className="text-4xl sm:text-5xl font-bold text-[#E6EDF3]">
             Start Conversations That Matter.
           </h1>

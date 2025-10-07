@@ -30,14 +30,27 @@ export default function Login() {
           transition={{ duration: 0.9, ease: "easeOut" }}
           className="flex-1 text-left space-y-4 sm:pr-10 mb-10 sm:mb-0"
         >
+          {/* Logo Section */}
+          <div className="flex items-center space-x-1 mb-3">
+            <h2 className="text-5xl sm:text-6xl font-extrabold text-[#00FF99] tracking-tight flex items-center">
+              <span>Chatbo</span>
+              <img
+                src="/favicon.ico"
+                alt="logo"
+                className="w-8 h-18 mx-1 inline-block align-middle"
+              />
+              <span>t</span>
+            </h2>
+          </div>
+
+          {/* Tagline */}
           <h1 className="text-4xl sm:text-5xl font-bold text-[#E6EDF3]">
             Connect. Chat. Collaborate.
           </h1>
           <p className="text-[#8B949E] text-lg leading-relaxed">
             A modern, real-time messaging platform built for seamless
-            conversations.  
-            Find friends by email, send requests instantly, and chat live with a
-            smooth, secure, and lightning-fast experience.
+            conversations. Find friends by email, send requests instantly, and
+            chat live with a smooth, secure, and lightning-fast experience.
           </p>
         </motion.div>
 
@@ -92,7 +105,6 @@ export default function Login() {
               Log in
             </button>
 
-            {/* Sign up redirect */}
             <p className="text-center text-sm text-[#8B949E] mt-4">
               Don’t have an account?{" "}
               <a

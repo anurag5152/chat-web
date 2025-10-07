@@ -1,3 +1,6 @@
+// server.js
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -11,38 +14,105 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
+
+/**
+ * Environment / runtime settings:
+ * - NODE_ENV: 'production' in production
+ * - FRONTEND_URL: main frontend URL (e.g. https://your-frontend.onrender.com)
+ * - ADDITIONAL_ORIGINS: comma-separated extra origins if needed
+ * - SESSION_SECRET: strong secret for sessions
+ */
+const { NODE_ENV, FRONTEND_URL, ADDITIONAL_ORIGINS } = process.env;
+
+// Trust proxy when in production (necessary for secure cookies behind proxies like Render)
+if (NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
+// Build allowed origins list dynamically
+const allowedOriginsSet = new Set([
+  'http://localhost:3000',          // local dev
+  'http://127.0.0.1:3000',          // local dev alt
+  FRONTEND_URL,                     // production frontend (from env)
+  ...(ADDITIONAL_ORIGINS ? ADDITIONAL_ORIGINS.split(',') : []),
+].filter(Boolean)); // filter out undefined/null
+
+const allowedOrigins = Array.from(allowedOriginsSet);
+
+function isOriginAllowed(origin) {
+  // origin may be undefined for same-origin/server-to-server requests (allow those)
+  if (!origin) return true;
+  return allowedOriginsSet.has(origin);
+}
+
+// Express CORS middleware using function origin check
+app.use(cors({
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
+
+// Preflight responses for safety
+app.options('*', cors({
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Session configuration (shared with socket.io)
+const sessionOptions = {
+  store: new FileStore({ path: './sessions' }),
+  name: process.env.SESSION_NAME || 'sid',
+  secret: process.env.SESSION_SECRET || 'your-secret-key',
+  resave: false,
+  saveUninitialized: false, // don't create session until something stored
+  cookie: {
+    secure: NODE_ENV === 'production', // true on HTTPS in production
+    sameSite: NODE_ENV === 'production' ? 'none' : 'lax', // allow cross-site cookies in prod
+    httpOnly: true,
+    maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+  },
+};
+
+const sessionMiddleware = session(sessionOptions);
+app.use(sessionMiddleware);
+
+// socket.io initialization with cors that mirrors express behavior
 const io = socketIo(server, {
   cors: {
-    origin: 'http://localhost:3000',
+    origin: (origin, callback) => {
+      // socket.io may pass origin as undefined for non-browser connections
+      if (isOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true,
   },
 });
 
-app.use(cors({
-  origin: 'http://localhost:3000',
-  credentials: true,
-}));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-
-const sessionMiddleware = session({
-  store: new FileStore({ path: './sessions' }),
-  secret: 'your-secret-key',
-  resave: false,
-  saveUninitialized: true,
-  cookie: {
-    secure: false, // set to true if you're using https
-  },
-});
-
-app.use(sessionMiddleware);
-
 // Make express-session available in socket.request
 io.use((socket, next) => {
+  // Reuse the same session middleware instance for socket requests
   sessionMiddleware(socket.request, {}, next);
 });
 
-// API endpoints
+/* -------------------- API endpoints -------------------- */
+
 app.post('/signup', async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password) {
@@ -94,6 +164,8 @@ app.get('/logout', (req, res) => {
     if (err) {
       return res.status(500).json({ error: 'Logout failed' });
     }
+    // Clear cookie client-side by setting minimal cookie with immediate expiry
+    res.clearCookie(sessionOptions.name);
     res.redirect('/login');
   });
 });
@@ -114,7 +186,6 @@ app.get('/api/session', (req, res) => {
     res.json({ loggedIn: false });
   }
 });
-
 
 app.get('/api/friends', (req, res) => {
   if (!req.session.userId) {
@@ -276,13 +347,11 @@ app.post('/api/friend-request/accept', (req, res) => {
           if (senderSocketId) {
             db.get('SELECT id, name, email FROM users WHERE id = ?', [userId], (err, user) => {
               if (!err && user) {
-                // send a compact friend object so client can add it
                 io.to(senderSocketId).emit('friend_request_accepted', { id: user.id, name: user.name, email: user.email });
               }
             });
           }
 
-          // Optionally, you might notify the acceptor via socket too (not necessary if the HTTP response updates UI)
           res.status(200).json({ message: 'Friend request accepted' });
         });
       });
@@ -322,7 +391,6 @@ app.post('/api/friends/remove', (req, res) => {
         io.to(removedUserSocketId).emit('friend_removed', { friendId: userId });
       }
 
-      // Also optionally notify the remover — not necessary because the HTTP response already updates the remover's UI
       res.status(200).json({ message: 'Friend removed successfully' });
     });
   });
@@ -351,7 +419,6 @@ app.get('/api/users/search', (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const { email } = req.query;
-  console.log(`Searching for email: ${email}`);
   if (!email) {
     return res.status(400).json({ error: 'Email query parameter is required' });
   }
@@ -361,7 +428,6 @@ app.get('/api/users/search', (req, res) => {
     if (err) {
       return res.status(500).json({ error: 'Server error' });
     }
-    console.log(`Found users: ${JSON.stringify(rows)}`);
     res.json(rows);
   });
 });
@@ -385,6 +451,8 @@ app.get('/api/messages/:friendId', (req, res) => {
     res.json(rows);
   });
 });
+
+/* -------------------- Socket.io realtime -------------------- */
 
 // simple map userId -> socketId; kept in memory
 const userSockets = {};
@@ -451,7 +519,10 @@ io.on('connection', (socket) => {
   });
 });
 
+/* -------------------- Start server -------------------- */
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
+  console.log('Allowed CORS origins:', allowedOrigins);
 });
