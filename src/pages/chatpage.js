@@ -3,188 +3,254 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
 
-// NOTE: make sure this matches your server location (set REACT_APP_SOCKET_URL in .env for deployed URL)
+// Set REACT_APP_SOCKET_URL in .env for deployed backend (use https in production)
 const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000';
 
 const Chatpage = () => {
-  // State
+  // --- Core state ---
   const [currentUser, setCurrentUser] = useState(null);
-  const [friends, setFriends] = useState([]);
-  const [friendRequests, setFriendRequests] = useState([]);
-  const [activeChat, setActiveChat] = useState(null);
-  const [messages, setMessages] = useState([]);
+  const [friends, setFriends] = useState([]); // { id, name, email }
+  const [friendRequests, setFriendRequests] = useState([]); // { id, sender_id, name, email }
+  const [activeChat, setActiveChat] = useState(null); // friend object
+  const [messages, setMessages] = useState([]); // messages for active chat
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [newMessage, setNewMessage] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
-  const messagesEndRef = useRef(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [unreadMap, setUnreadMap] = useState({}); // friendId -> count
 
-  // socket ref so it persists across renders
   const socketRef = useRef(null);
-  // keep activeChat in a ref for stable access inside socket handlers
+  const messagesEndRef = useRef(null);
   const activeChatRef = useRef(activeChat);
-
   useEffect(() => { activeChatRef.current = activeChat; }, [activeChat]);
 
-  const groupMessagesByDate = (messagesList) => {
-    return messagesList.reduce((acc, message) => {
-      const date = new Date(message.timestamp).toLocaleDateString();
-      if (!acc[date]) acc[date] = [];
-      acc[date].push(message);
-      return acc;
-    }, {});
-  };
-
-  const formatTime = (timestamp) => {
-    return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  };
-
-  // authenticated fetch helper
+  // helper to include credentials
   const authFetch = (url, options = {}) => {
-    return fetch(url, {
-      ...options,
-      credentials: 'include',
-    });
+    return fetch(url, { credentials: 'include', ...options });
   };
 
-  // initial data load
+  // --- initial load: session, friends, requests ---
   useEffect(() => {
     let cancelled = false;
-    const fetchData = async () => {
+    const loadAll = async () => {
       try {
-        const userRes = await authFetch('/api/session');
-        const userData = await userRes.json();
-        if (!userData.loggedIn) {
+        const sessionRes = await authFetch('/api/session');
+        const sessionData = await sessionRes.json();
+        if (!sessionData.loggedIn) {
           window.location.href = '/login';
           return;
         }
         if (cancelled) return;
-        setCurrentUser(userData.user);
+        setCurrentUser(sessionData.user);
 
-        const friendsRes = await authFetch('/api/friends');
-        const friendsData = await friendsRes.json();
-        if (!cancelled) setFriends(Array.isArray(friendsData) ? friendsData : []);
-
-        const requestsRes = await authFetch('/api/friend-requests');
-        const requestsData = await requestsRes.json();
-        if (!cancelled) setFriendRequests(Array.isArray(requestsData) ? requestsData : []);
-      } catch (error) {
-        console.error('Failed to fetch initial data:', error);
+        // load friends & requests immediately
+        await Promise.all([fetchFriends(), fetchFriendRequests()]);
+      } catch (err) {
+        console.error('Initial load failed:', err);
       }
     };
-
-    fetchData();
+    loadAll();
     return () => { cancelled = true; };
   }, []);
 
-  // socket connect + core listeners (create when currentUser becomes available)
+  // --- Fetch helpers ---
+  const fetchFriends = async () => {
+    try {
+      const res = await authFetch('/api/friends');
+      if (!res.ok) {
+        console.error('/api/friends error', res.status);
+        return;
+      }
+      const data = await res.json();
+      setFriends(Array.isArray(data) ? data : []);
+      // clear unread for removed friends
+      setUnreadMap(prev => {
+        const next = {};
+        (Array.isArray(data) ? data : []).forEach(f => {
+          if (prev[f.id]) next[f.id] = prev[f.id];
+        });
+        return next;
+      });
+    } catch (err) {
+      console.error('fetchFriends error', err);
+    }
+  };
+
+  const fetchFriendRequests = async () => {
+    try {
+      const res = await authFetch('/api/friend-requests');
+      if (!res.ok) {
+        console.error('/api/friend-requests error', res.status);
+        return;
+      }
+      const data = await res.json();
+      setFriendRequests(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error('fetchFriendRequests error', err);
+    }
+  };
+
+  // load messages for active friend (single definition — no duplicates)
+  const fetchMessagesForFriend = async (friendId) => {
+    setLoadingMessages(true);
+    try {
+      const res = await authFetch(`/api/messages/${friendId}`);
+      if (!res.ok) {
+        console.error('/api/messages error', res.status);
+        setMessages([]);
+        return;
+      }
+      const data = await res.json();
+      setMessages(Array.isArray(data) ? data : []);
+      // reset unread count for this friend
+      setUnreadMap(prev => {
+        const copy = { ...prev };
+        delete copy[friendId];
+        return copy;
+      });
+    } catch (err) {
+      console.error('fetchMessagesForFriend error', err);
+      setMessages([]);
+    } finally {
+      setLoadingMessages(false);
+    }
+  };
+
+  // --- Socket lifecycle: create when currentUser is available ---
   useEffect(() => {
     if (!currentUser) return;
 
-    // If socket already exists and connected with different user, disconnect and recreate
+    // cleanup existing socket if any
     if (socketRef.current) {
-      try {
-        // If session/user changed (unlikely during normal flow), reconnect
-        socketRef.current.disconnect();
-      } catch (e) {
-        // ignore
-      }
+      try { socketRef.current.disconnect(); } catch (e) {}
       socketRef.current = null;
     }
 
-    // create socket
+    // create socket with reconnect and credentials
     const socket = io(SOCKET_URL, {
       withCredentials: true,
+      transports: ['websocket'],
       autoConnect: true,
-      transports: ['websocket'], // prefer websocket to avoid polling handshake issues
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
     });
 
     socketRef.current = socket;
-    // attach auth info if desired (not required by server, but handy)
-    socket.auth = { userId: currentUser.id };
+    // expose for debugging in console
+    window._chatSocket = socket;
 
-    const onConnect = () => console.log('Socket connected:', socket.id);
-    const onConnectError = (err) => console.error('Socket connection error:', err);
+    console.log('[chat] socket attempting connect to', SOCKET_URL);
+
+    // attach events
+    const onConnect = () => {
+      console.log('[chat] Socket connected', socket.id);
+      setSocketConnected(true);
+      // re-sync friends & requests on reconnect so UI matches DB
+      fetchFriends();
+      fetchFriendRequests();
+      // if active chat exists, refresh messages (in case of missed messages)
+      if (activeChatRef.current) fetchMessagesForFriend(activeChatRef.current.id);
+    };
+    const onDisconnect = (reason) => {
+      console.warn('[chat] Socket disconnected', reason);
+      setSocketConnected(false);
+    };
+    const onConnectError = (err) => {
+      console.error('[chat] connect_error', err);
+    };
 
     socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
     socket.on('connect_error', onConnectError);
 
-    // New incoming friend request
+    // When someone sends a friend request to me -> re-fetch friend-requests list
     const handleNewFriendRequest = (request) => {
-      setFriendRequests(prev => {
-        if (prev.find(r => r.id === request.id)) return prev;
-        return [request, ...prev];
-      });
+      fetchFriendRequests();
+      console.log('[chat] new_friend_request', request);
     };
     socket.on('new_friend_request', handleNewFriendRequest);
 
-    // When someone accepts your friend request
+    // When someone accepts my friend request -> re-fetch friends
     const handleFriendRequestAccepted = (newFriend) => {
-      setFriends(prev => {
-        if (prev.find(f => f.id === newFriend.id)) return prev;
-        return [newFriend, ...prev];
-      });
+      fetchFriends();
+      console.log('[chat] friend_request_accepted', newFriend);
     };
     socket.on('friend_request_accepted', handleFriendRequestAccepted);
 
-    // When someone removes you as a friend
+    // When someone removes me as a friend -> re-fetch friends
     const handleFriendRemoved = ({ friendId }) => {
-      setFriends(prev => prev.filter(friend => friend.id !== friendId));
-      setActiveChat(currentActiveChat => {
-        if (currentActiveChat && currentActiveChat.id === friendId) {
+      console.log('[chat] friend_removed', friendId);
+      fetchFriends();
+      setActiveChat(prev => {
+        if (prev && prev.id === friendId) {
           setMessages([]);
           return null;
         }
-        return currentActiveChat;
+        return prev;
       });
     };
     socket.on('friend_removed', handleFriendRemoved);
 
-    // Incoming private message handler (uses activeChatRef)
+    // Private message handler
     const handlePrivateMessage = (message) => {
-      // Avoid duplicates by id
-      setMessages(prevMessages => {
-        if (prevMessages.find(m => m.id === message.id)) return prevMessages;
+      console.log('[chat] private_message received', message);
 
-        // If message belongs to the active chat, append it
-        const currentActive = activeChatRef.current;
-        if (currentActive && (message.sender_id === currentActive.id || message.receiver_id === currentActive.id)) {
-          return [...prevMessages, message];
-        } else {
-          // Not the active chat: you may increment an unread counter here
-          console.log('Private message received for other chat', message);
-          return prevMessages;
+      setMessages(prev => {
+        // avoid duplicates
+        if (prev.find(m => m.id === message.id)) return prev;
+
+        const active = activeChatRef.current;
+
+        // If belongs to active chat, append
+        if (active && (message.sender_id === active.id || message.receiver_id === active.id)) {
+          return [...prev, message];
         }
+
+        // Not active: no change to messages array for active chat
+        return prev;
       });
+
+      // increment unread count if message is for some friend who is not active
+      const otherId = message.sender_id === currentUser.id ? message.receiver_id : message.sender_id;
+      const activeId = activeChatRef.current ? activeChatRef.current.id : null;
+      if (otherId && otherId !== activeId) {
+        setUnreadMap(prev => {
+          const prevCount = prev[otherId] || 0;
+          return { ...prev, [otherId]: prevCount + 1 };
+        });
+      }
     };
     socket.on('private_message', handlePrivateMessage);
 
-    // cleanup on unmount or currentUser change
+    // cleanup on unmount/change
     return () => {
       try {
         socket.off('connect', onConnect);
+        socket.off('disconnect', onDisconnect);
         socket.off('connect_error', onConnectError);
         socket.off('new_friend_request', handleNewFriendRequest);
         socket.off('friend_request_accepted', handleFriendRequestAccepted);
         socket.off('friend_removed', handleFriendRemoved);
         socket.off('private_message', handlePrivateMessage);
         socket.disconnect();
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
+      window._chatSocket = null;
       socketRef.current = null;
+      setSocketConnected(false);
     };
-  }, [currentUser]);
+  }, [currentUser]); // recreate socket only when user changes (login/logout)
 
-  // auto-scroll when messages change
+  // scroll on messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // user search debounce
+  // --- search users ---
   useEffect(() => {
-    const searchUsers = async () => {
+    const t = setTimeout(async () => {
       if (searchQuery.trim() === '') {
         setSearchResults([]);
         return;
@@ -192,55 +258,44 @@ const Chatpage = () => {
       try {
         const res = await authFetch(`/api/users/search?email=${encodeURIComponent(searchQuery)}`);
         if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          console.error('Failed to search users:', data.error || res.statusText);
+          console.error('search error', res.status);
           return;
         }
         const data = await res.json();
         setSearchResults(Array.isArray(data) ? data : []);
-      } catch (error) {
-        console.error('Error searching users:', error);
+      } catch (err) {
+        console.error('search failed', err);
       }
-    };
-
-    const debounceTimeout = setTimeout(searchUsers, 300);
-    return () => clearTimeout(debounceTimeout);
+    }, 300);
+    return () => clearTimeout(t);
   }, [searchQuery]);
 
-  // select friend & load messages
+  // --- interactions: select friend, send message, friend-request actions ---
+
   const selectFriend = async (friend) => {
     setActiveChat(friend);
-    setMessages([]); // Clear previous messages while loading
+    setMessages([]);
     setLoadingMessages(true);
     try {
-      const res = await authFetch(`/api/messages/${friend.id}`);
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        console.error('Failed to fetch messages:', data.error || res.statusText);
-        return;
-      }
-      const data = await res.json();
-      setMessages(Array.isArray(data) ? data : []);
-    } catch (error) {
-      console.error('Error fetching messages:', error);
+      await fetchMessagesForFriend(friend.id); // calls the single defined function above
     } finally {
       setLoadingMessages(false);
       setSidebarOpen(false);
     }
   };
 
-  // Robust send: optimistic UI + server replace (dedupe)
   const handleSendMessage = () => {
     if (!newMessage.trim() || !activeChat || !currentUser) return;
+
     const socket = socketRef.current;
     if (!socket || !socket.connected) {
-      console.error('Socket not connected. Message not sent.');
+      console.error('Socket not connected - cannot send. Trying to reconnect...');
+      if (socket) socket.connect();
       return;
     }
 
-    // client temporary message id
     const tempId = uuidv4();
-    const optimisticMessage = {
+    const optimistic = {
       id: tempId,
       sender_id: currentUser.id,
       receiver_id: activeChat.id,
@@ -248,44 +303,33 @@ const Chatpage = () => {
       timestamp: new Date().toISOString(),
     };
 
-    // Append immediately (optimistic)
-    setMessages(prev => [...prev, optimisticMessage]);
+    // append optimistic
+    setMessages(prev => [...prev, optimistic]);
 
-    const messageData = {
-      // server ignores client id, but we pass tempId so we can match on callback
+    const payload = {
       id: tempId,
       content: newMessage,
       to: activeChat.id,
     };
 
-    // send to server with callback
-    socket.emit('private_message', messageData, (response) => {
+    socket.emit('private_message', payload, (response) => {
       if (response && response.error) {
-        console.error('Message failed to send:', response.error);
-        // Optionally mark the optimistic message as failed (not implemented visually here)
+        console.error('send error callback', response.error);
         return;
       }
       if (response && response.message) {
         const serverMsg = response.message;
         setMessages(prev => {
-          // If server message already present, remove temp if present
-          const already = prev.find(m => m.id === serverMsg.id);
-          if (already) {
-            // remove temp if exists
+          // if server id already exists, remove temp
+          if (prev.find(m => m.id === serverMsg.id)) {
             return prev.filter(m => m.id !== tempId);
           }
-
-          // Replace temp message with server message (by tempId)
           let replaced = false;
           const mapped = prev.map(m => {
-            if (m.id === tempId) {
-              replaced = true;
-              return serverMsg;
-            }
+            if (m.id === tempId) { replaced = true; return serverMsg; }
             return m;
           });
           if (replaced) return mapped;
-          // If temp wasn't found for some reason, append server message if not duplicate
           return prev.find(m => m.id === serverMsg.id) ? prev : [...prev, serverMsg];
         });
       }
@@ -302,14 +346,15 @@ const Chatpage = () => {
         body: JSON.stringify({ email }),
       });
       const data = await res.json();
-      if (res.ok) {
-        console.log('Friend request sent!');
-        setSearchResults(prev => prev.filter(user => user.email !== email));
-      } else {
-        console.error(`Failed to send friend request: ${data.error}`);
+      if (!res.ok) {
+        console.error('friend-request error', data.error);
+        return;
       }
-    } catch (error) {
-      console.error('Error sending friend request:', error);
+      // re-sync friend requests
+      fetchFriendRequests();
+      setSearchResults(prev => prev.filter(u => u.email !== email));
+    } catch (err) {
+      console.error('send friend-request failed', err);
     }
   };
 
@@ -321,46 +366,15 @@ const Chatpage = () => {
         body: JSON.stringify({ requestId }),
       });
       const data = await res.json();
-      if (res.ok) {
-        console.log('Friend request accepted!');
-        const acceptedRequest = friendRequests.find(req => req.id === requestId);
-        if (acceptedRequest) {
-          const newFriend = {
-            id: acceptedRequest.sender_id,
-            name: acceptedRequest.name,
-            email: acceptedRequest.email,
-          };
-          setFriends(prev => (prev.find(f => f.id === newFriend.id) ? prev : [newFriend, ...prev]));
-        }
-        setFriendRequests(prev => prev.filter(req => req.id !== requestId));
-      } else {
-        console.error(`Failed to accept friend request: ${data.error}`);
+      if (!res.ok) {
+        console.error('accept request error', data.error);
+        return;
       }
-    } catch (error) {
-      console.error('Error accepting friend request:', error);
-    }
-  };
-
-  const handleRemoveFriend = async (friendId) => {
-    try {
-      const res = await authFetch('/api/friends/remove', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ friendId }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        console.log('Friend removed!');
-        setFriends(prev => prev.filter(friend => friend.id !== friendId));
-        if (activeChat?.id === friendId) {
-          setActiveChat(null);
-          setMessages([]);
-        }
-      } else {
-        console.error(`Failed to remove friend: ${data.error}`);
-      }
-    } catch (error) {
-      console.error('Error removing friend:', error);
+      // re-sync friends + requests
+      await fetchFriends();
+      await fetchFriendRequests();
+    } catch (err) {
+      console.error('accept friend request failed', err);
     }
   };
 
@@ -372,294 +386,281 @@ const Chatpage = () => {
         body: JSON.stringify({ requestId }),
       });
       const data = await res.json();
-      if (res.ok) {
-        console.log('Friend request rejected!');
-        setFriendRequests(prev => prev.filter(req => req.id !== requestId));
-      } else {
-        console.error(`Failed to reject friend request: ${data.error}`);
+      if (!res.ok) {
+        console.error('reject request error', data.error);
+        return;
       }
-    } catch (error) {
-      console.error('Error rejecting friend request:', error);
+      fetchFriendRequests();
+    } catch (err) {
+      console.error('reject friend request failed', err);
     }
   };
 
-  // Logout: call /logout endpoint to destroy server session, disconnect socket, redirect to login
-  const handleLogout = async () => {
+  const handleRemoveFriend = async (friendId) => {
     try {
-      await authFetch('/logout', { method: 'GET' });
-    } catch (e) {
-      // ignore errors but continue to cleanup
-    } finally {
-      try {
-        if (socketRef.current) {
-          socketRef.current.disconnect();
-          socketRef.current = null;
+      const res = await authFetch('/api/friends/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ friendId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        console.error('remove friend error', data.error);
+        return;
+      }
+      // server should emit friend_removed to the other user.
+      // For consistency, refresh our friends list immediately:
+      await fetchFriends();
+      // if removed friend was active, close chat
+      setActiveChat(prev => {
+        if (prev && prev.id === friendId) {
+          setMessages([]);
+          return null;
         }
-      } catch (e) { /* ignore */ }
-      window.location.href = '/login';
+        return prev;
+      });
+    } catch (err) {
+      console.error('remove friend failed', err);
     }
   };
+
+  // logout
+  const handleLogout = async () => {
+    try {
+      await authFetch('/logout');
+    } catch (e) { /* ignore */ }
+    try { if (socketRef.current) socketRef.current.disconnect(); } catch (_) {}
+    window.location.href = '/login';
+  };
+
+  // --- UI rendering helpers ---
+  const groupMessagesByDate = (messagesList) => {
+    return messagesList.reduce((acc, message) => {
+      const date = new Date(message.timestamp).toLocaleDateString();
+      if (!acc[date]) acc[date] = [];
+      acc[date].push(message);
+      return acc;
+    }, {});
+  };
+
+  const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const unreadFor = (id) => unreadMap[id] || 0;
 
   if (!currentUser) {
     return (
-      <div className="flex h-screen bg-gray-100 items-center justify-center">
+      <div className="flex h-screen items-center justify-center bg-[#0D1117] text-white">
         <p>Loading...</p>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen bg-[#0D1117] text-[#E6EDF3] font-mono">
-      {/* Desktop Sidebar */}
-      <aside className="hidden md:flex w-1/4 bg-[#0D1117] border-r border-gray-800 flex-col shadow-inner">
+    <div className="flex h-screen bg-[#0D1117] text-[#E6EDF3] font-sans">
+      {/* Sidebar - Desktop */}
+      <aside className="hidden md:flex w-80 flex-col bg-[#071017] border-r border-gray-800">
         <div className="p-4 border-b border-gray-800">
-          <input
-            type="text"
-            placeholder="Search by email"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full p-2 bg-[#161B22] border border-[#00FF99] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#00FF99] text-[#E6EDF3]"
-          />
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-lg font-semibold">{currentUser.name}</div>
+              <div className="text-xs text-gray-400">{currentUser.email}</div>
+            </div>
+            <div className="flex flex-col items-end">
+              <div className={`w-3 h-3 rounded-full ${socketConnected ? 'bg-green-400' : 'bg-red-500'}`} title={socketConnected ? 'Connected' : 'Disconnected'} />
+              <button onClick={handleLogout} className="text-xs mt-2 px-2 py-1 bg-[#0F1720] rounded">Logout</button>
+            </div>
+          </div>
+
+          <div className="mt-3">
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search users by email..."
+              className="w-full p-2 bg-[#061018] border border-[#123] rounded text-sm"
+            />
+          </div>
         </div>
+
         <div className="flex-1 overflow-y-auto">
           {searchResults.length > 0 && (
-            <div>
-              <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Search Results</h2>
+            <div className="p-3">
+              <div className="text-sm text-[#00FF99] mb-2 font-semibold">Search Results</div>
               <ul>
-                {searchResults.map(user => (
-                  <li key={user.id} className="flex items-center justify-between p-4 hover:bg-[#161B22] cursor-pointer">
-                    <div className="flex items-center">
-                      <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                      <div>
-                        <span className="font-bold">{user.name}</span>
-                        <span className="text-xs text-gray-400 block">{user.email}</span>
-                      </div>
+                {searchResults.map(u => (
+                  <li key={u.id} className="flex items-center justify-between p-2 hover:bg-[#07171b] rounded">
+                    <div>
+                      <div className="font-medium">{u.name}</div>
+                      <div className="text-xs text-gray-400">{u.email}</div>
                     </div>
-                    <button onClick={() => handleSendFriendRequest(user.email)} className="p-2 text-[#00FF99] hover:bg-[#00FF99] hover:text-black rounded">Add</button>
+                    <button onClick={() => handleSendFriendRequest(u.email)} className="px-3 py-1 rounded bg-[#0b2] text-black text-sm">Add</button>
                   </li>
                 ))}
               </ul>
             </div>
           )}
-          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friend Requests</h2>
-          {friendRequests.length > 0 ? (
-            <ul>
-              {friendRequests.map(req => (
-                <li key={req.id} className="flex items-center justify-between p-4 hover:bg-[#161B22]">
-                  <div className="flex items-center">
-                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                    <div>
-                      <span className="font-bold">{req.name}</span>
-                      <span className="text-xs text-gray-400 block">{req.email}</span>
-                    </div>
-                  </div>
-                  <div className="flex space-x-2">
-                    <button onClick={() => handleAcceptFriendRequest(req.id)} className="p-2 text-green-500 hover:bg-green-500 hover:text-black rounded">Accept</button>
-                    <button onClick={() => handleRejectFriendRequest(req.id)} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Reject</button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : <p className="px-4 text-gray-500">No new requests.</p>}
 
-          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friends</h2>
-          {friends.length > 0 ? (
-            <ul>
-              {friends.map(friend => (
-                <li
-                  key={friend.id}
-                  onClick={() => selectFriend(friend)}
-                  className={`p-4 flex items-center justify-between hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
-                >
-                  <div className="flex items-center">
-                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                    <div className="truncate">{friend.name}</div>
-                  </div>
-                  <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Remove</button>
-                </li>
-              ))}
-            </ul>
-          ) : <p className="px-4 text-gray-500">Add some friends to start chatting.</p>}
+          <div className="p-3 border-t border-gray-800">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm text-[#00FF99] font-semibold">Friend Requests</div>
+            </div>
+            {friendRequests.length > 0 ? (
+              <ul>
+                {friendRequests.map(req => (
+                  <li key={req.id} className="flex items-center justify-between p-2 hover:bg-[#07171b] rounded">
+                    <div>
+                      <div className="font-medium">{req.name}</div>
+                      <div className="text-xs text-gray-400">{req.email}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => handleAcceptFriendRequest(req.id)} className="px-2 py-1 rounded bg-green-500 text-black text-sm">Accept</button>
+                      <button onClick={() => handleRejectFriendRequest(req.id)} className="px-2 py-1 rounded bg-red-500 text-black text-sm">Reject</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : <div className="text-xs text-gray-500">No requests</div>}
+          </div>
+
+          <div className="p-3 border-t border-gray-800">
+            <div className="text-sm text-[#00FF99] font-semibold mb-2">Friends</div>
+            {friends.length > 0 ? (
+              <ul>
+                {friends.map(f => (
+                  <li
+                    key={f.id}
+                    onClick={() => selectFriend(f)}
+                    className={`flex items-center justify-between p-2 rounded cursor-pointer hover:bg-[#07171b] ${activeChat?.id === f.id ? 'bg-[#07171b] border-l-4 border-[#00FF99]' : ''}`}
+                  >
+                    <div className="truncate">
+                      <div className="font-medium">{f.name}</div>
+                      <div className="text-xs text-gray-400 truncate">{f.email}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {unreadFor(f.id) > 0 && <span className="bg-red-500 text-xs px-2 py-0.5 rounded">{unreadFor(f.id)}</span>}
+                      <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(f.id); }} className="text-xs px-2 py-1 bg-[#220000] rounded">Remove</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : <div className="text-xs text-gray-500">No friends yet</div>}
+          </div>
         </div>
       </aside>
 
-      {/* Mobile Sidebar Drawer */}
-      <div className={`fixed inset-y-0 left-0 z-40 w-3/4 max-w-xs transform bg-[#0D1117] border-r border-gray-800 shadow-lg transition-transform duration-200 md:hidden ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="p-4 border-b border-gray-800">
-          <input
-            type="text"
-            placeholder="Search by email"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full p-2 bg-[#161B22] border border-[#00FF99] rounded-lg focus:outline-none focus:ring-2 focus:ring-[#00FF99] text-[#E6EDF3]"
-          />
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          {searchResults.length > 0 && (
+      {/* Mobile Drawer */}
+      <div className={`fixed z-40 inset-y-0 left-0 w-64 transform bg-[#071017] border-r border-gray-800 md:hidden transition-transform ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="p-4">
+          <div className="flex items-center justify-between">
             <div>
-              <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Search Results</h2>
-              <ul>
-                {searchResults.map(user => (
-                  <li key={user.id} className="flex items-center justify-between p-4 hover:bg-[#161B22] cursor-pointer">
-                    <div className="flex items-center">
-                      <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                      <div>
-                        <span className="font-bold">{user.name}</span>
-                        <span className="text-xs text-gray-400 block">{user.email}</span>
-                      </div>
-                    </div>
-                    <button onClick={() => { handleSendFriendRequest(user.email); setSidebarOpen(false); }} className="p-2 text-[#00FF99] hover:bg-[#00FF99] hover:text-black rounded">Add</button>
-                  </li>
-                ))}
-              </ul>
+              <div className="text-sm font-semibold">{currentUser.name}</div>
+              <div className="text-xs text-gray-400">{currentUser.email}</div>
             </div>
-          )}
-          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friend Requests</h2>
-          {friendRequests.length > 0 ? (
-            <ul>
-              {friendRequests.map(req => (
-                <li key={req.id} className="flex items-center justify-between p-4 hover:bg-[#161B22]">
-                  <div className="flex items-center">
-                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                    <div>
-                      <span className="font-bold">{req.name}</span>
-                      <span className="text-xs text-gray-400 block">{req.email}</span>
-                    </div>
-                  </div>
-                  <div className="flex space-x-2">
-                    <button onClick={() => { handleAcceptFriendRequest(req.id); setSidebarOpen(false); }} className="p-2 text-green-500 hover:bg-green-500 hover:text-black rounded">Accept</button>
-                    <button onClick={() => { handleRejectFriendRequest(req.id); setSidebarOpen(false); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Reject</button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : <p className="px-4 text-gray-500">No new requests.</p>}
+            <button onClick={() => setSidebarOpen(false)} className="text-white">Close</button>
+          </div>
 
-          <h2 className="p-4 text-lg font-semibold text-[#00FF99]">Friends</h2>
-          {friends.length > 0 ? (
-            <ul>
-              {friends.map(friend => (
-                <li
-                  key={friend.id}
-                  onClick={() => { selectFriend(friend); setSidebarOpen(false); }}
-                  className={`p-4 flex items-center justify-between hover:bg-[#161B22] cursor-pointer border-l-4 ${activeChat?.id === friend.id ? 'border-[#00FF99] bg-[#161B22]' : 'border-transparent'}`}
-                >
-                  <div className="flex items-center">
-                    <div className="w-8 h-8 rounded-full bg-teal-500/50 mr-3"></div>
-                    <div className="truncate">{friend.name}</div>
-                  </div>
-                  <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(friend.id); setSidebarOpen(false); }} className="p-2 text-red-500 hover:bg-red-500 hover:text-black rounded">Remove</button>
-                </li>
-              ))}
-            </ul>
-          ) : <p className="px-4 text-gray-500">Add some friends to start chatting.</p>}
+          <div className="mt-3">
+            <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search email..." className="w-full p-2 bg-[#061018] rounded text-sm" />
+          </div>
+        </div>
+
+        <div className="p-3 overflow-y-auto">
+          <div className="text-sm text-[#00FF99] mb-2">Friend Requests</div>
+          {friendRequests.map(req => (
+            <div key={req.id} className="flex items-center justify-between p-2">
+              <div>
+                <div className="font-medium">{req.name}</div>
+                <div className="text-xs text-gray-400">{req.email}</div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => { handleAcceptFriendRequest(req.id); setSidebarOpen(false); }} className="px-2 py-1 bg-green-500 rounded text-black text-xs">Accept</button>
+                <button onClick={() => { handleRejectFriendRequest(req.id); setSidebarOpen(false); }} className="px-2 py-1 bg-red-500 rounded text-black text-xs">Reject</button>
+              </div>
+            </div>
+          ))}
+
+          <div className="text-sm text-[#00FF99] my-2">Friends</div>
+          {friends.map(f => (
+            <div key={f.id} onClick={() => { selectFriend(f); setSidebarOpen(false); }} className="flex items-center justify-between p-2 hover:bg-[#07171b] rounded cursor-pointer">
+              <div>
+                <div className="font-medium">{f.name}</div>
+                <div className="text-xs text-gray-400">{f.email}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {unreadFor(f.id) > 0 && <span className="bg-red-500 text-xs px-2 py-0.5 rounded">{unreadFor(f.id)}</span>}
+                <button onClick={(e) => { e.stopPropagation(); handleRemoveFriend(f.id); setSidebarOpen(false); }} className="px-2 py-1 bg-[#220000] rounded text-xs">Remove</button>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
-      {/* overlay for mobile drawer */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/40 md:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
+      {/* overlay for mobile */}
+      {sidebarOpen && <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setSidebarOpen(false)} />}
 
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col bg-[#0D1117]">
-        {/* Header */}
-        <div className="p-4 bg-[#0D1117]/50 border-b border-gray-800 flex items-center shadow-lg justify-between">
-          <div className="flex items-center space-x-3">
-            {/* hamburger only on mobile */}
-            <button
-              className="md:hidden p-2 bg-[#161B22] rounded-lg mr-1"
-              onClick={() => setSidebarOpen(v => !v)}
-              aria-label="Open menu"
-            >
-              <svg width="20" height="14" viewBox="0 0 24 24" fill="none" className="text-[#E6EDF3]">
-                <path d="M3 6h18M3 12h18M3 18h18" stroke="#E6EDF3" strokeWidth="1.6" strokeLinecap="round" />
-              </svg>
-            </button>
-
-            <div className="relative">
-              <div className="w-10 h-10 rounded-full bg-teal-500/50 mr-4" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-xl font-semibold text-white truncate">{activeChat ? activeChat.name : currentUser.name}</h2>
-              <p className="text-sm text-[#8B949E] truncate">{activeChat ? activeChat.email : currentUser.email}</p>
+      {/* Main chat area */}
+      <div className="flex-1 flex flex-col">
+        <header className="p-4 border-b border-gray-800 flex items-center justify-between bg-[#041018]">
+          <div className="flex items-center gap-3">
+            <button className="md:hidden p-2 bg-[#061018] rounded" onClick={() => setSidebarOpen(true)}>☰</button>
+            <div>
+              <div className="text-lg font-semibold">{activeChat ? activeChat.name : 'Select a friend'}</div>
+              <div className="text-xs text-gray-400">{activeChat ? activeChat.email : currentUser.email}</div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleLogout}
-              className="text-sm px-3 py-1 rounded bg-[#161B22] hover:bg-[#161B22]/80 text-[#E6EDF3]"
-            >
-              Logout
-            </button>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 text-xs text-gray-300">
+              <span className={`w-3 h-3 rounded-full ${socketConnected ? 'bg-green-400' : 'bg-red-500'}`} />
+              <span>{socketConnected ? 'Connected' : 'Disconnected'}</span>
+            </div>
+            <button onClick={handleLogout} className="px-3 py-1 bg-[#061018] rounded">Logout</button>
           </div>
-        </div>
+        </header>
 
         {activeChat ? (
           <>
-            {/* Messages */}
-            <div className="flex-1 p-4 overflow-y-auto">
+            <main className="flex-1 overflow-y-auto p-4 bg-[#06131a]">
               {loadingMessages ? (
-                <div className="flex h-full items-center justify-center">
-                  <p>Loading messages...</p>
-                </div>
+                <div className="flex items-center justify-center h-full text-gray-400">Loading messages...</div>
               ) : (
                 <>
-                  {Object.entries(groupMessagesByDate(messages)).map(([date, messagesForDate]) => (
-                    <React.Fragment key={date}>
-                      <div className="text-center my-4">
-                        <span className="text-xs text-gray-500 bg-gray-800 px-2 py-1 rounded-full">{date}</span>
-                      </div>
-                      {messagesForDate.map((message) => (
-                        <div
-                          key={message.id}
-                          className={`flex ${message.sender_id === currentUser.id ? 'justify-end' : 'justify-start'} mb-4`}
-                        >
-                          <div
-                            className={`p-3 rounded-xl max-w-md shadow-lg ${message.sender_id === currentUser.id ? 'bg-[#238636] text-white border border-[#00FF99]/50' : 'bg-[#161B22] text-[#E6EDF3] shadow-inner'}`}
-                          >
-                            <div>{message.content}</div>
-                            <div className="text-xs text-gray-400 mt-1">{formatTime(message.timestamp)}</div>
+                  {Object.entries(groupMessagesByDate(messages)).map(([date, msgs]) => (
+                    <div key={date}>
+                      <div className="text-center text-xs text-gray-400 my-4">{date}</div>
+                      {msgs.map(m => (
+                        <div key={m.id} className={`flex mb-4 ${m.sender_id === currentUser.id ? 'justify-end' : 'justify-start'}`}>
+                          <div className={`p-3 rounded-xl max-w-md ${m.sender_id === currentUser.id ? 'bg-[#1f8b5a] text-white' : 'bg-[#0e1619] text-[#E6EDF3]'}`}>
+                            <div>{m.content}</div>
+                            <div className="text-xs text-gray-400 mt-1">{formatTime(m.timestamp)}</div>
                           </div>
                         </div>
                       ))}
-                    </React.Fragment>
+                    </div>
                   ))}
                   <div ref={messagesEndRef} />
                 </>
               )}
-            </div>
+            </main>
 
-            {/* Message Input */}
-            <div className="p-4 bg-[#0D1117]/50 border-t border-gray-800">
-              <div className="flex items-center bg-[#161B22] rounded-lg border border-transparent focus-within:border-[#00FF99]">
+            <footer className="p-4 border-t border-gray-800 bg-[#041018]">
+              <div className="flex gap-2">
                 <input
-                  type="text"
                   value={newMessage}
                   onChange={(e) => setNewMessage(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                  placeholder="Type a message..."
-                  className="flex-1 p-3 bg-transparent rounded-l-lg focus:outline-none text-[#E6EDF3]"
+                  placeholder={socketConnected ? 'Type a message...' : 'Disconnected — trying to reconnect...'}
+                  className="flex-1 p-3 rounded bg-[#061018] text-white outline-none"
+                  disabled={!socketConnected}
                 />
-                <button
-                  onClick={handleSendMessage}
-                  disabled={!newMessage.trim()}
-                  className="p-3 bg-gradient-to-r from-teal-500 to-green-500 text-white rounded-r-lg hover:from-teal-600 hover:to-green-600 disabled:opacity-50"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />
-                  </svg>
+                <button onClick={handleSendMessage} disabled={!newMessage.trim() || !socketConnected} className="px-4 py-2 rounded bg-gradient-to-r from-teal-500 to-green-500 text-black disabled:opacity-50">
+                  Send
                 </button>
               </div>
-            </div>
+            </footer>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-[#8B949E] text-xl">
-            <p>Select a friend to start chatting.</p>
+          <div className="flex-1 flex items-center justify-center text-gray-400">
+            Select a friend to start chatting.
           </div>
         )}
       </div>
